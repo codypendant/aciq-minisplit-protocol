@@ -736,6 +736,15 @@ interval:
                   case 0x11:   // left/right flow
                   case 0x0C:   // per-axis enable companions
                   case 0x0D:
+                               // NOTE: these four must keep their OWN break.
+                               // Appending a case label to the end of this
+                               // group once made all four fall through into
+                               // the eco-mode publish below, so Eco Mode
+                               // flapped ON/OFF/ON across the three frames of
+                               // a single state dump -- 0E=08 set it, a real
+                               // 13=00 cleared it, then 0C=1C set it again.
+                    mapped = true;
+                    break;
                   case 0x13:   // ECO MODE. Command `13=01` captured directly:
                                // the AC confirmed with `DF 01 00 13 01` and the
                                // compressor target fell 86%% -> 44%% within two

@@ -91,7 +91,11 @@ A5 01 01 21 20 00 00 12 2E 69 0A 0A 00 73 00 00 05 06    fan speed 6
 A5 01 01 21 25 00 00 12 50 2F 0A 0A 00 73 00 00 05 01    fan speed 1
 A5 01 01 21 26 00 00 12 33 25 0A 0A 00 73 01 00 05 00    fan AUTO
 A5 01 01 21 2F 00 00 0F C7 DD 0A 0A 00 13 01             eco mode ON
+A5 01 01 21 36 00 00 12 B7 F8 0A 0A 00 13 00 00 01 01    eco OFF *and* power ON
 ```
+
+**A command may carry more than one record.** The last example sets two fields
+in a single frame. Do not assume one command equals one change.
 
 Eco mode is a good worked example of reading a command end to end:
 
@@ -402,8 +406,10 @@ CRC-16/XMODEM
   region       the ENTIRE FRAME with bytes 8-9 REMOVED -- not zeroed
 ```
 
-Verified on **105 frames**: every length from 12 to 90 bytes, both directions,
-all five payload types, zero failures. Reference implementation in
+Verified on **105 captured frames** during analysis, then confirmed on live
+hardware: the listener now checks every frame it receives and has recorded
+**zero failures** across every length from 12 to 90 bytes, both directions and
+all five payload types. Reference implementation in
 [`tools/crc.py`](tools/crc.py).
 
 ```python

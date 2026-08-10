@@ -76,6 +76,22 @@ map instead.** It cannot lie about structure.
 
 Use `tools/crc.py` rather than reimplementing.
 
+## A C++ trap this config has hit
+
+The record decoder is one big `switch (fid)`. Several case groups deliberately
+share a body — the airflow fields, the phantom wide-field halves. **Appending a
+new `case` label to the end of such a group silently enrols every label above it
+into your new behaviour.**
+
+That exact mistake shipped once: `case 0x13` (eco mode) was added to the end of
+the airflow group, so `0x0E`, `0x11`, `0x0C` and `0x0D` all began publishing eco
+mode. The symptom was Eco Mode flapping ON → OFF → ON across the three frames of
+a single state dump, because different frames end on different members of the
+group. It looked like a protocol mystery and was a missing `break`.
+
+When adding a field, give it its own labelled block, and re-read the group above
+the insertion point.
+
 ## Style
 
 - Tables for field maps and comparisons; they are what readers scan for.
