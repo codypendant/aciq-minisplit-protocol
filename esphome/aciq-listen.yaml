@@ -305,6 +305,21 @@ text_sensor:
     icon: mdi:help-box
     update_interval: never
 
+  # Unmapped WIDE (32-bit) fields, shown raw and -- when the value falls in a
+  # plausible thermistor range -- also as degrees F on the assumption of
+  # centi-Celsius, the encoding every confirmed temperature on this bus uses.
+  #
+  # This exists to catch the INDOOR COIL thermistor. A coil has the most
+  # violent signature on the bus: it plunges from room temperature to roughly
+  # 5-10 C within a couple of minutes of the compressor engaging, then climbs
+  # straight back when it stops. Watch this through one cooling cycle from a
+  # warm start and it identifies itself.
+  - platform: template
+    name: "Wide Fields"
+    id: ac_wide_fields
+    icon: mdi:thermometer-lines
+    update_interval: never
+
   # Decoded records whose field id has no meaning assigned yet, as `id=val`
   # pairs. POWER and ROOM TEMPERATURE are the two that still matter -- watch
   # this while toggling power, and watch it drift over hours for the sensor.
@@ -322,6 +337,7 @@ interval:
           static std::string prev_frame;
           static std::string prev_unmapped;
           static std::string prev_fields;
+          static std::string prev_wide;
 
           // Two receive-only taps. ch 0 = RED (AC), ch 1 = BLACK (module).
           // Indexed rather than pointer-typed so this stays plain ESPHome API.
@@ -385,10 +401,28 @@ interval:
             // (`<id> 00 00 <hi> <lo> 00`). The generic 2-byte walk below
             // mislabels those -- it reported room temperature as a phantom
             // "0A=D2" field. Scan for the wide form explicitly first.
+            std::string wide;
             if (v[3] == 0x21 && n >= 18 && v[10] == 0x0C && v[11] == 0x0C) {
               for (size_t i = 13; i + 4 < n; i++) {
                 if (v[i+1] != 0x00 || v[i+2] != 0x00) continue;
                 uint16_t val = ((uint16_t) v[i+3] << 8) | v[i+4];
+                // Anything wide we have not claimed gets surfaced with a
+                // centi-Celsius reading alongside, so a thermistor is obvious.
+                switch (v[i]) {
+                  case 0x02: case 0x03: case 0x05: case 0x5C:
+                  case 0x60: case 0x72: case 0xC0:
+                    break;                      // already understood
+                  default: {
+                    char t[48];
+                    if (val >= 200 && val <= 6000)
+                      sprintf(t, "%02X=%u(%.1fF) ", v[i], val,
+                              val / 100.0f * 9.0f / 5.0f + 32.0f);
+                    else
+                      sprintf(t, "%02X=%u ", v[i], val);
+                    wide += t;
+                    break;
+                  }
+                }
                 switch (v[i]) {
                   case 0x03:   // ROOM TEMPERATURE, centi-degrees Celsius.
                                // Reported unprompted every ~60 s.
@@ -520,6 +554,12 @@ interval:
                 id(ac_setpoint).publish_state(sp);
                 mapped = true;
               }
+            }
+
+            if (!wide.empty() && wide != prev_wide) {
+              prev_wide = wide;
+              id(ac_wide_fields).publish_state(wide);
+              ESP_LOGI(TAG, "  wide: %s", wide.c_str());
             }
 
             if (!mapped && hex != prev_unmapped) {

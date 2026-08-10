@@ -194,6 +194,35 @@ variable-speed machine reports things a fixed-speed one does not: speed or
 frequency, input power, and target-versus-actual pairs. Interpret candidate
 fields with that in mind rather than assuming on/off telemetry.
 
+
+### Thermistors: what is on the bus and what is still missing
+
+The hardware has more temperature sensors than the bus has so far revealed:
+
+| Sensor | Field | Status |
+|---|---|---|
+| Air entering the indoor unit | `0x03` | **Found.** Note this is a thermistor in front of the indoor coil, so it measures **return air**, not room air. It tracks the room but reads warmer with the blower off |
+| Outdoor | `0x60` | **Found.** Air or coil still unsettled |
+| **Indoor coil** | — | **Not yet seen** |
+| Blower outlet | — | **Not yet seen** |
+
+**Ruling out a candidate:** `0x64` (930 / 890 / 850 / 620) looks like an
+evaporator coil at 6–9 °C, but it reads **exactly 0 within 38 seconds of
+power-off**. A real coil drifts *up* toward room temperature when the compressor
+stops — it does not go to zero. That behaviour fits **input power in watts**.
+
+**Where to look:** the 72-byte frame contains `BD`, `BE`, `BF` — three
+consecutive wide fields sitting at zero, immediately before `C0` (compressor). A
+contiguous run of unpopulated slots next to a known sensor field is exactly
+where extra thermistors would live.
+
+**How to catch it:** run the listener through a cooling cycle from a warm start
+and watch the `Wide Fields` entity, which prints every unclaimed wide field with
+a centi-Celsius reading alongside. A coil thermistor has the most violent
+signature on this bus — it plunges from room temperature to roughly 5–10 °C
+within a couple of minutes of the compressor engaging, then climbs straight back
+when it stops. Nothing else moves like that.
+
 ## Behaviour worth exploiting
 
 **Power-on dumps complete state.** Switching the unit on emits 66 + 90 + 72-byte
