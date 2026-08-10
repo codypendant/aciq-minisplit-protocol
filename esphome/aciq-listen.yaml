@@ -490,7 +490,16 @@ interval:
                 // Anything wide we have not claimed gets surfaced with a
                 // centi-Celsius reading alongside, so a thermistor is obvious.
                 switch (v[i]) {
-                  case 0x02: case 0x03: case 0x05: case 0x5C:
+                  // Every id we understand -- WIDE **and NARROW**. A narrow
+                  // field holding zero (`01 00 00 ...`) is byte-identical to
+                  // the start of a wide one, so power (0x01) was surfacing as
+                  // a phantom "01=512(41.2F)". Excluding only the wide ids was
+                  // not enough; the whole known set has to be excluded.
+                  case 0x00:                                    // misalignment
+                  case 0x01: case 0x05: case 0x0C: case 0x0D:   // narrow
+                  case 0x0E: case 0x11: case 0x12: case 0x13:
+                  case 0x73: case 0xDF:
+                  case 0x02: case 0x03: case 0x5C:              // wide
                   case 0x60: case 0x64: case 0x65: case 0x72: case 0xC0:
                     break;                      // already understood
                   default: {
