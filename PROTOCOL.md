@@ -201,7 +201,7 @@ The hardware has more temperature sensors than the bus has so far revealed:
 
 | Sensor | Field | Status |
 |---|---|---|
-| Air entering the indoor unit | `0x03` | **Found.** Note this is a thermistor in front of the indoor coil, so it measures **return air**, not room air. It tracks the room but reads warmer with the blower off |
+| Intake air | `0x03` | **Found.** Reads the room, but is **biased low while running** — see below |
 | Outdoor | `0x60` | **Found.** Air or coil still unsettled |
 | **Indoor coil** | `0x5C` | **Found** — see below |
 | Blower outlet | — | **Not yet seen** |
@@ -213,6 +213,30 @@ stops — it does not go to zero. It is **input power in watts**, corroborated b
 the vendor app exposing a power-usage tracker: the unit has to report power
 somewhere, and this is the only field shaped like it. Verify by comparing
 against the app's own reading while running.
+
+### `0x03` reads low while the unit runs
+
+This is a wall-mount mini split, so there is **no return duct** — the head unit
+draws room air straight through its top grille, and `0x03` is the thermistor in
+that intake. It genuinely measures room air, which is why "room temperature" is
+a fair label.
+
+But it sits inches from where the unit discharges its own cold supply air, so
+while cooling, some output recirculates into the intake and the body of the unit
+is cold. The sensor reads **several degrees below true room temperature**:
+
+| state | `0x03` |
+|---|---|
+| cooling | 78.8 °F |
+| everything off | **82.9 °F** |
+
+Nothing warmed by 4 °F in that moment — the bias simply disappeared when the
+airflow stopped. **Treat the running value as approximate.** An automation
+driven off it will see a step change every time the unit starts or stops.
+
+(Ducted systems have the same problem for a different reason, where the sensor
+really is in a return plenum. Do not carry that vocabulary over to a mini split:
+there is no return here.)
 
 ### The indoor coil was hiding as "blower RPM"
 
