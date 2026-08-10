@@ -181,7 +181,7 @@ remainder as 2-byte records, skipping 6 bytes whenever a wide id appears.
 | `0x5C` | **Indoor coil temperature** | centi-°C | 10–13 °C while cooling; warms to ambient when off |
 | `0x0E` | Vertical airflow | 1 byte | 8 positions per the app |
 | `0x11` | Horizontal airflow | 1 byte | 9 positions per the app; observed set is exactly `01 02 03 08 09 0A 0B 0C 0D` |
-| `0x60` | **Outdoor AIR temperature** | centi-°C | Read 89.6–91.4 °F while the compressor pulled 850 W — a condensing coil would be 115–130 °F under that load. **Only reported while the outdoor unit is energised** — silent for 5 hours of idle |
+| `0x60` | **Outdoor AIR temperature** | centi-°C | **Only reported while the outdoor unit is energised** — silent across 5 hours of idle |
 | `0x64` | **Input power** | 16-bit, W | 620–930 at partial load, 0 when off. The app has a power-usage tracker, so the unit must report this |
 | `0xC0` | **Compressor target** | 16-bit, % | Commanded speed. Jumps straight to value on start |
 | `0x65` | **Compressor actual** | 16-bit, % | Ramps up to meet `0xC0` |
@@ -233,6 +233,16 @@ unit is off. **This unit is a multi-speed DC inverter** — a fixed-speed
 compressor would report one running value or zero, whereas the observed
 30 / 38 / 40 / 42 / 48 / 66 / 82 is continuous modulation.
 
+### Outdoor air, not outdoor coil — settled
+
+Two independent observations, either of which is sufficient:
+
+- It read **89.6–91.4 °F while the compressor pulled 850 W**. A condensing coil
+  under that load sits at 115–130 °F.
+- Across a morning it climbed **monotonically with the sun** — 78.8 °F at 07:17
+  to 91.4 °F at 10:32 — with no step changes at compressor start or stop. A coil
+  would jump with every cycle.
+
 ### Target and actual — settled
 
 `0xC0` is the **commanded** compressor speed and `0x65` is the **actual**. A
@@ -252,6 +262,36 @@ servo-tracked percentage does.
 
 Input power tracks the ramp exactly — 130 → 260 → 420 → 660 → 840 → 910 W,
 settling near 850 W.
+
+**`0x64` is instantaneous draw, not a function of compressor speed.** Do not try
+to model consumption from `0x65`:
+
+| compressor | power |
+|---|---|
+| 0% | 0 W |
+| 15% | 220 W |
+| 28% | 630 W |
+| 86% | 850 W |
+
+Every cycle ramps 50 → 900 W and then settles, so a given speed maps to
+different readings depending on where in the cycle you sample. Integrate the
+power field itself; do not derive it.
+
+### Eco mode changes the whole control strategy
+
+Worth knowing before interpreting anyone's capture — a unit in eco behaves like
+a different machine:
+
+| | eco off | eco on |
+|---|---|---|
+| Compressor target | up to 86% | capped **16–28%** |
+| Cycle length | continuous pull-down | ~11 min on/off |
+| Room swing | tight | **~3 °F** around setpoint |
+
+Eco also **drifts the setpoint upward on its own** — 26.0 °C became 27.0 °C
+overnight with nobody touching the remote, and the trailing display byte moved
+`0x50` → `0x51` (80 → 81 °F) to match. If you are diffing captures and the
+setpoint moved, check eco before assuming a decode error.
 
 **Knowing the unit is an inverter narrows the remaining unknowns**, because a
 variable-speed machine reports things a fixed-speed one does not: speed or
