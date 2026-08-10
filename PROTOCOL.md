@@ -171,12 +171,23 @@ Both readings fit and it is worth not guessing:
 `0x65` behaves identically — 0–66 running, 0 when off — so the pair is most
 likely **target and actual**, or **compressor and air handler**.
 
-**The experiment that settles it:** command a known percentage from the app and
-see which field lands on that exact number. A percent field will match the
-commanded value; a frequency field will not.
+**The experiment that settles it:** the compressor on this unit **starts at 1%
+and ramps up** from a cold start. So power the unit off, wait, and power it on
+with the listener running:
 
-Until then the listener publishes `0xC0` as a percentage, because that is the
-better-supported reading, and labels it as unconfirmed.
+- A field that **starts near 1 and climbs** is the **0–100% speed**.
+- A field that **jumps straight to ~30 and climbs from there** is **Hz** — that
+  floor is the compressor's minimum operating frequency, below which an inverter
+  will not run at all.
+
+Current evidence leans Hz for `0xC0`: it has **never been observed below 30
+while running**, and at one captured power-on it went 0 → 44 within about three
+seconds, which is not what a 1% ramp looks like. That is one observation, so it
+is a lean, not a conclusion.
+
+Until a power-on ramp is captured the listener publishes `0xC0` as a
+percentage and labels it unconfirmed — deliberately the more conservative
+choice, since a wrong unit on a diagnostic is cheaper than a wrong scale.
 
 **Knowing the unit is an inverter narrows the remaining unknowns**, because a
 variable-speed machine reports things a fixed-speed one does not: speed or
