@@ -385,64 +385,103 @@ when it stops. Nothing else moves like that.
 
 **Power-on dumps complete state.** Switching the unit on emits 66 + 90 + 72-byte
 frames back to back, unasked. A freshly booted controller can obtain full state
-without needing to request it — which matters because request framing is part of
-the unsolved write path.
+without needing to request it — useful even now that writing is possible, since
+it avoids having to synthesise a state request at all.
 
 Between changes the AC reports sparsely: a room-temperature frame each minute
 and short frames when something moves.
 
-## The check field
-
-**Polynomial confirmed: CRC-16/CCITT `0x1021`, MSB-first.** Derived from the
-data rather than guessed — the counter bit deltas on the ACK family are
-`bit0 = AA51`, `bit1 = 4483`, `bit2 = 8906`. Since `0x4483 << 1 = 0x8906`, and
-`0xAA51 << 1` overflows to `0x54A2` which XORed with `0x4483` yields `0x1021`,
-that is a textbook CCITT shift register.
-
-### Solved for ACK frames
+## The check field — SOLVED
 
 ```
-poly    0x1021, MSB-first
-region  ACK bytes [0:10], check field (8,9) zeroed
-init    0x28C8   AC  ACKs, trailing 80 0A   -- verified on 9 frames
-init    0xD07E   MOD ACKs, trailing 80 0C   -- verified on 30 frames
+CRC-16/XMODEM
+  polynomial   0x1021
+  init         0x0000
+  bit order    MSB-first
+  final XOR    none
+  region       the ENTIRE FRAME with bytes 8-9 REMOVED -- not zeroed
 ```
 
-Two inits because the trailing type byte folds in as a per-direction constant.
+Verified on **105 frames**: every length from 12 to 90 bytes, both directions,
+all five payload types, zero failures. Reference implementation in
+[`tools/crc.py`](tools/crc.py).
 
-**Why ACKs cracked it when nothing else did:** they are 12 bytes differing in
-**exactly one byte** — the echoed counter. Every earlier attempt used frames
-where two or more bytes moved together, leaving the linear system
-underdetermined. **When attacking a checksum, find the frame family with a
-single varying byte.** That family had been in every capture all along.
+```python
+def crc16(data, init=0x0000):
+    c = init
+    for b in data:
+        c ^= b << 8
+        for _ in range(8):
+            c = ((c << 1) ^ 0x1021) & 0xFFFF if c & 0x8000 else (c << 1) & 0xFFFF
+    return c
 
-### Still unsolved for the longer report frames
+def compute(frame):
+    return crc16(bytes(frame[0:8]) + bytes(frame[10:]))   # note the hole
+```
 
-Region and init are not yet pinned for `0C 0C` reports. Bytes 8–9, big-endian, deterministic — identical frames always
-produce identical values.
+### Remove the check field. Do not zero it.
 
-Ruled out: all standard CRC16 polynomials (`0x1021`, `0x8005`, `0x3D65`,
-`0xA001`, `0x8408`, `0x0589`, `0xC867`) in both bit orders and both byte orders,
-across every contiguous span and end offset, with the field zeroed and not,
-solving `init` by GF(2) linear algebra over 16 clean frames from both
-directions.
+This is the whole puzzle, and it cost two days.
 
-Established facts for whoever cracks it:
+Zeroing bytes 8-9 leaves **two extra bytes in the shift register**. The effect
+is not a clean failure — it is worse, because it *half* works:
 
-1. The field is **linear over GF(2)** in the counter byte:
-   `chk(1)^chk(3) == chk(5)^chk(7) == 0x60E3` exactly. Per-bit deltas for the
-   counter are `bit0=B861 bit1=60E3 bit2=C1C6 bit3=93AD bit4=377B`.
-2. On two 24-byte frames with **byte-identical payloads** differing only in the
-   counter, the delta `00E4` is reproduced **exactly** by CRC-16/CCITT `0x1021`
-   with the region ending at `len-2`.
-3. **Payload changes do not follow that rule.** After removing the counter's
-   contribution the residual matches no single-byte CRC contribution at any
-   offset.
-4. Frames with identical payloads solve to identical `init`; differing payloads
-   do not.
+- Bytes **after** the check field still fit CRC-1021 at their positional tail.
+- The counter byte, which sits **before** it, fits CRC-1021 at a tail **exactly
+  2 shorter** than its position.
+- Nothing fits all of them at once.
 
-So the counter is covered by something CRC-1021-shaped, and the payload
-participates by some other route. Sample frames are in
-[`captures/`](captures/).
+That produces a very convincing wrong conclusion, and it is the one this
+document carried for two days: *"the counter is protected by something
+CRC-1021-shaped and the payload is folded in some other way."* There is no
+second mechanism. It is one ordinary CRC over a region with a hole in it.
 
-Receiving does not require it. Transmitting does.
+The same mistake also produced a **fake partial solution**. Fitting only the
+12-byte ACKs — which differ in exactly one byte — yielded "region `[0:10]`,
+init `0x28C8` one direction and `0xD07E` the other". That reproduces every ACK
+and is still wrong: with one varying byte the fit only ever modelled the
+counter, and the two "inits" were the constant remainder of the bytes the model
+was ignoring. **A checksum model that needs a different constant per message
+type is not solved; it is overfitted.**
+
+### How it was actually found
+
+Parameter search had already failed across seven polynomials, both bit orders,
+both byte orders, and every contiguous span. The move that worked was to stop
+guessing parameters and **recover the linear map directly**:
+
+1. Collect ~80 frames of one length. In the 18-byte report family exactly four
+   bytes vary — counter, field id, and the two value bytes — so there are 32
+   unknown bit contributions plus a constant, against 79 equations.
+2. Solve `chk = C ⊕ Σ(contribution of each set bit)` as a **GF(2) linear
+   system**. It came out consistent and reproduced all 79 frames exactly. That
+   alone proves the check field is linear, which rules out sums, LRCs, and
+   anything carrying.
+3. Read the polynomial off the solution. Consecutive bits of one byte were
+   `2042 → 4084 → 8108 → 1231`: each the previous shifted left, the overflow
+   XORing in **0x1021**.
+4. Compare each byte's **effective** tail — the `T` for which
+   `crc([0x01] + [0x00]*T)` equals its bit-0 contribution — against its
+   **positional** tail. Bytes after the check field matched exactly. The counter
+   was short by 2. That names the hole and finishes the problem.
+
+| byte | positional tail | effective tail |
+|---|---|---|
+| `[4]` counter | 13 | **11** |
+| `[13]` field id | 4 | 4 |
+| `[16]` value hi | 1 | 1 |
+| `[17]` value lo | 0 | 0 |
+
+**Generalise this.** When a checksum resists parameter search, recover the
+linear map instead. It cannot lie about structure, and it yields both the
+polynomial and the region rather than one guess at a time.
+
+### What this unlocks
+
+Receiving never needed it — header, length byte and the ACK counter echo frame
+the stream reliably. **Transmitting does**, and this was the last blocker.
+
+The listener now verifies every frame and exposes a **CRC Failures** counter
+alongside Frames Rejected. The two mean different things: Rejected counts
+implausible length bytes, CRC Failures counts real corruption. Both should stay
+at zero.
