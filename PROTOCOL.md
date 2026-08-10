@@ -105,7 +105,7 @@ remainder as 2-byte records, skipping 6 bytes whenever a wide id appears.
 | `0x05` | **Fan speed** | 1 byte | `1`–`7`, **`0` = auto** |
 | `0x12` | **Mode** | 1 byte | `00`–`04`. Which is which: unverified |
 | `0x72` | Fan percent | 1 byte | 1 / 25 / 40 / 55 / 70 / 85 / 100, tracks `0x05` |
-| `0x5C` | Blower RPM | 16-bit | 1400–2300 observed |
+| `0x5C` | **Indoor coil temperature** | centi-°C | 10–13 °C while cooling; warms to ambient when off |
 | `0x0E` | Vertical airflow | 1 byte | 8 positions per the app |
 | `0x11` | Horizontal airflow | 1 byte | 9 positions per the app; observed set is exactly `01 02 03 08 09 0A 0B 0C 0D` |
 | `0x60` | **Outdoor temperature** | centi-°C | Cross-checked against an independent outdoor sensor |
@@ -203,7 +203,7 @@ The hardware has more temperature sensors than the bus has so far revealed:
 |---|---|---|
 | Air entering the indoor unit | `0x03` | **Found.** Note this is a thermistor in front of the indoor coil, so it measures **return air**, not room air. It tracks the room but reads warmer with the blower off |
 | Outdoor | `0x60` | **Found.** Air or coil still unsettled |
-| **Indoor coil** | — | **Not yet seen** |
+| **Indoor coil** | `0x5C` | **Found** — see below |
 | Blower outlet | — | **Not yet seen** |
 
 **Ruling out a candidate:** `0x64` (930 / 890 / 850 / 620) *looks* like an
@@ -214,7 +214,28 @@ the vendor app exposing a power-usage tracker: the unit has to report power
 somewhere, and this is the only field shaped like it. Verify by comparing
 against the app's own reading while running.
 
-**Where to look:** the 72-byte frame contains `BD`, `BE`, `BF` — three
+### The indoor coil was hiding as "blower RPM"
+
+`0x5C` was mislabelled for most of this project because 1400–2300 is a
+believable fan speed and the number never looked wrong. It is a **temperature in
+centi-°C**:
+
+| when | `0x5C` | °C |
+|---|---|---|
+| cooling | 1000–1300 | **10–13** — textbook evaporator coil |
+| shutdown +35 s | 1500 | 15 |
+| +48 s / +75 s | 1700 → 2100 | 17 → 21 |
+| settled, unit off | **2600** | **26** — equal to room temp, which read `0x0A28` too |
+
+**A fan goes to zero when it stops. A coil warms to ambient.** The give-away was
+the value *climbing* after shutdown and converging on the room temperature.
+
+Generalising: **a plausible-looking number is not evidence.** Check that a field
+behaves correctly at the boundaries — off, minimum, maximum — not just that its
+range looks sensible.
+
+**Where to look for the blower-outlet sensor:** the 72-byte frame contains
+`BD`, `BE`, `BF` — three
 consecutive wide fields sitting at zero, immediately before `C0` (compressor). A
 contiguous run of unpopulated slots next to a known sensor field is exactly
 where extra thermistors would live.

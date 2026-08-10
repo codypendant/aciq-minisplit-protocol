@@ -259,13 +259,16 @@ sensor:
     accuracy_decimals: 0
     update_interval: never
 
+  # Field 0x5C. Previously mislabelled "Blower RPM" -- the values looked like a
+  # plausible fan speed until it kept climbing after shutdown instead of
+  # dropping to zero.
   - platform: template
-    name: "Blower RPM"
-    id: ac_blower_rpm
-    unit_of_measurement: "rpm"
-    icon: mdi:fan
+    name: "Indoor Coil Temperature"
+    id: ac_coil_temp
+    unit_of_measurement: "°F"
+    device_class: temperature
     state_class: measurement
-    accuracy_decimals: 0
+    accuracy_decimals: 1
     update_interval: never
 
   - platform: template
@@ -442,9 +445,16 @@ interval:
                       mapped = true;
                     }
                     break;
-                  case 0x5C:   // Indoor blower RPM.
-                    if (val >= 100 && val <= 4000) {
-                      id(ac_blower_rpm).publish_state(val);
+                  case 0x5C:   // INDOOR COIL TEMPERATURE, centi-degrees C.
+                               // NOT blower RPM -- that was a mislabel. 1000-
+                               // 1300 (10-13 C) while cooling is a textbook
+                               // evaporator coil, and after shutdown it climbed
+                               // 1500 -> 1700 -> 1900 -> 2100 -> 2300 -> 2600
+                               // and settled at exactly the room temperature
+                               // (0x03 also read 0x0A28). A fan goes to ZERO
+                               // when it stops; a coil warms to ambient.
+                    if (val >= 200 && val <= 6000) {
+                      id(ac_coil_temp).publish_state(val / 100.0f * 9.0f / 5.0f + 32.0f);
                       mapped = true;
                     }
                     break;

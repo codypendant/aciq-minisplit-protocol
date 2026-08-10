@@ -83,7 +83,7 @@ Live Home Assistant sensors, decoded from the appliance's own reporting:
 | Mode | field `0x12` | Raw 0–4; see [the caveat](#the-mode-names-are-deliberately-not-mapped) |
 | Fan Speed | field `0x05` | 1–7, and **0 = auto** |
 | Fan Percent | field `0x72` | 1 / 25 / 40 / 55 / 70 / 85 / 100 |
-| Blower RPM | field `0x5C` | 1000–2300 observed |
+| Indoor Coil Temperature | field `0x5C` | Evaporator; 10–13 °C while cooling |
 | Outdoor Temperature | field `0x60` | Cross-checked against an independent outdoor sensor |
 | Compressor Speed | field `0xC0` | 0 when off. Percent vs Hz not yet settled |
 | Power Usage | field `0x64` | Watts; corroborated by the app's own power tracker |
