@@ -99,18 +99,44 @@ property is why a read-only node is useful rather than a stepping stone — no
 dead reckoning, no drift, and it sees changes made from the remote, the app, or
 the unit's own buttons.
 
-## Why listen-only is the right first build
+## Why listen-only is the final design, not a stage
 
 The transmit pin is **not connected**. Not disabled in software — physically
 absent from the wiring.
 
-That is not timidity. This appliance is mounted at ceiling height, the harness
-must be cut to tap it, and a malformed frame on a bus you only partly understand
-is a genuinely bad idea when the failure mode involves a ladder and a teardown.
-A listener also runs for days while you use the unit normally, which is how the
-field map got finished — the analyser only ever gave 25- and 62-second windows.
+This started as caution: the appliance is at ceiling height, the harness must be
+cut to tap it, and a malformed frame on a partly-understood bus is a bad idea
+when the failure mode involves a ladder and a teardown.
 
-Add control to a parser you already trust. Not before.
+It ended as the design, for a better reason: **the stock WiFi dongle stays
+plugged in and keeps working.** The app still functions, including the
+diagnostics it exposes that the bus does not, and the appliance is entirely
+unmodified. Meanwhile Home Assistant gets sixteen local sensors the dongle never
+surfaces — coil temperature, compressor commanded vs actual, live input power,
+outdoor air.
+
+**The tradeoff is real and worth stating plainly.** Black is the module's
+transmit output. An ESP32 driving it too puts two push-pull outputs on one net,
+which damages drivers rather than merely misbehaving. So keeping the dongle
+means no control from this path, permanently. You get complete local telemetry
+and keep the vendor app; you do not get local control.
+
+If you want control instead, the protocol is fully documented — see
+[`PROTOCOL.md`](PROTOCOL.md), including the checksum and command format — and
+the honest way to do it is to **remove the dongle** and let the ESP32 own the
+bus.
+
+<details>
+<summary>The way to have both, if you insist</summary>
+
+The module only transmits ACKs, roughly 50 ms after each AC frame, so the line
+is idle most of the time. A series resistor (~1 kΩ) on the ESP's TX limits fault
+current to about 3 mA if both ever drive simultaneously, which makes contention
+harmless rather than destructive, and you transmit only inside known-idle
+windows. This is a real technique, not a bodge — but it adds a failure mode, and
+it is not what this repo builds.
+
+</details>
 
 ## Hardware
 
@@ -210,14 +236,13 @@ What remains is deliberate:
 
 ## Roadmap
 
-**Transmit, then a real climate entity.** Wire black to the ESP32's TX through
-the shifter and drive the bus. Command values must be sent in **centi-°C**, not
-°F.
+**Map Sleep and Timer**, the two app functions still unidentified.
 
-**Final hardware:** a 30-pin ESP32 with no headers soldered, mounted inside the
-original WiFi dongle's shell so the installation is externally indistinguishable
-from stock. The board this was developed on is a header-equipped devkit taped
-out of the way — fine for a bench, not for a sealed unit near a blower.
+**Transmit and a real climate entity** are fully specified but deliberately not
+built here — see [why](#why-listen-only-is-the-final-design-not-a-stage). If you
+are building that, everything you need is in [`PROTOCOL.md`](PROTOCOL.md):
+framing, the checksum, the command format, and the setpoint units (**centi-°C**,
+not °F).
 
 ## Repository layout
 
