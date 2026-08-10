@@ -86,6 +86,7 @@ Live Home Assistant sensors, decoded from the appliance's own reporting:
 | Blower RPM | field `0x5C` | 1000–2300 observed |
 | Outdoor Temperature | field `0x60` | Cross-checked against an independent outdoor sensor |
 | Compressor Speed | field `0xC0` | 0 when off. Percent vs Hz not yet settled |
+| Power Usage | field `0x64` | Watts; corroborated by the app's own power tracker |
 | Frames Decoded / Rejected | — | Health check. Rejected should stay at zero |
 | Last Frame / Unknown Fields | — | The mapping queue for anything not yet identified |
 

@@ -109,6 +109,7 @@ remainder as 2-byte records, skipping 6 bytes whenever a wide id appears.
 | `0x0E` | Vertical airflow | 1 byte | 8 positions per the app |
 | `0x11` | Horizontal airflow | 1 byte | 9 positions per the app; observed set is exactly `01 02 03 08 09 0A 0B 0C 0D` |
 | `0x60` | **Outdoor temperature** | centi-°C | Cross-checked against an independent outdoor sensor |
+| `0x64` | **Input power** | 16-bit, W | 620–930 at partial load, 0 when off. The app has a power-usage tracker, so the unit must report this |
 | `0xC0` | **Compressor speed** | 16-bit | 30–82 running, **exactly 0** when off. Units unsettled — see below |
 | `0x41`, `0x42` | Unix timestamps | 32-bit | In `0D 0D` clock frames |
 
@@ -135,7 +136,6 @@ not conclusions.**
 | Id | Values seen | Hypothesis |
 |---|---|---|
 | `0x65` | 0–66, **0 when off** | Pairs with `0xC0`. Target vs actual speed, or compressor vs air handler — both are 0–100% settable on this unit |
-| `0x64` | 930, 890, 850, 620 | **Input power (W)** — a strong fit for an 18k BTU inverter at partial load, and it falls with compressor frequency rather than sitting at a fixed draw |
 | `0x06` | `40`, `A4` | — |
 | `0x13`, `0x15`, `0xDF` | 0/1 toggles | Feature flags |
 | `0x38`, `0x3D`, `0x74`, `0x95`, `0xA4`, `0xBD`–`0xBF` | mostly constant | — |
@@ -206,10 +206,13 @@ The hardware has more temperature sensors than the bus has so far revealed:
 | **Indoor coil** | — | **Not yet seen** |
 | Blower outlet | — | **Not yet seen** |
 
-**Ruling out a candidate:** `0x64` (930 / 890 / 850 / 620) looks like an
+**Ruling out a candidate:** `0x64` (930 / 890 / 850 / 620) *looks* like an
 evaporator coil at 6–9 °C, but it reads **exactly 0 within 38 seconds of
 power-off**. A real coil drifts *up* toward room temperature when the compressor
-stops — it does not go to zero. That behaviour fits **input power in watts**.
+stops — it does not go to zero. It is **input power in watts**, corroborated by
+the vendor app exposing a power-usage tracker: the unit has to report power
+somewhere, and this is the only field shaped like it. Verify by comparing
+against the app's own reading while running.
 
 **Where to look:** the 72-byte frame contains `BD`, `BE`, `BF` — three
 consecutive wide fields sitting at zero, immediately before `C0` (compressor). A

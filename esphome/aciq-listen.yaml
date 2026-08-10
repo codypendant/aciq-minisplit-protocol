@@ -237,6 +237,17 @@ sensor:
     accuracy_decimals: 1
     update_interval: never
 
+  # Field 0x64. The app exposes a power-usage tracker, so the unit reports this
+  # somewhere; 0x64 is the only field shaped like watts.
+  - platform: template
+    name: "Power Usage"
+    id: ac_power_w
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: never
+
   # Field 0xC0. Reads 0 whenever the unit is off. Units unconfirmed -- see the
   # note in the lambda; percent is the better-supported reading, not Hz.
   - platform: template
@@ -410,7 +421,7 @@ interval:
                 // centi-Celsius reading alongside, so a thermistor is obvious.
                 switch (v[i]) {
                   case 0x02: case 0x03: case 0x05: case 0x5C:
-                  case 0x60: case 0x72: case 0xC0:
+                  case 0x60: case 0x64: case 0x72: case 0xC0:
                     break;                      // already understood
                   default: {
                     char t[48];
@@ -469,6 +480,19 @@ interval:
                                // lands on it exactly.
                     if (val <= 200) {
                       id(ac_compressor).publish_state(val);
+                      mapped = true;
+                    }
+                    break;
+                  case 0x64:   // INPUT POWER, watts. The app has a power-usage
+                               // tracker, which means the unit must report
+                               // power somewhere -- and this is the only field
+                               // shaped like it: 620-930 falling with load, and
+                               // exactly 0 when off (a coil thermistor would
+                               // drift UP toward room temperature instead).
+                               // VERIFY by comparing against the app's own
+                               // power reading while running.
+                    if (val <= 5000) {
+                      id(ac_power_w).publish_state(val);
                       mapped = true;
                     }
                     break;
