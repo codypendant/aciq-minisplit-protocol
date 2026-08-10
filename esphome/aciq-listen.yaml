@@ -65,7 +65,7 @@
 #   [4]     COUNTER     increments per message
 #   [5:6]   00 00
 #   [7]     LENGTH      total frame length, INCLUDING these 8 header bytes
-#   [8:9]   CHECK       16-bit, big-endian -- NOT a standard CRC16, unsolved
+#   [8:9]   CHECK       CRC-16/XMODEM, big-endian -- SOLVED, see below
 #   [10:]   payload     starts `0C 0C 00`, then <field> <value> 00, then data
 #
 # Reference frames (0 framing errors, all length bytes valid):
@@ -81,10 +81,27 @@
 #   * FAN SPEED -- payload field id 0x05 (frame index 13), value at index 14.
 #     Stepped 3 -> 4 on two consecutive fan presses.
 #
-# The checksum is deliberately NOT validated here. It resisted solving against
-# 16 clean frames across 7 polynomials and every span/offset combination, and
-# receive-only does not need it: header + length + the ACK counter echo are
-# enough to frame reliably. Do not invent a check that "looks close".
+# *** CHECKSUM SOLVED 2026-08-10 *** and now verified on every frame.
+#
+#   CRC-16/XMODEM: poly 0x1021, init 0x0000, MSB-first, no final XOR
+#   region: the whole frame with bytes 8-9 *** REMOVED, not zeroed ***
+#
+# Validated on 105 frames -- every length from 12 to 90 bytes, both directions,
+# all five payload types -- with zero failures.
+#
+# THE REMOVE-vs-ZERO DISTINCTION IS THE WHOLE PUZZLE. Two days of attempts
+# zeroed the check field, which leaves two extra bytes in the shift register.
+# That makes the counter byte appear to fit CRC-1021 at a tail two SHORTER than
+# its position, while the payload never fits at all -- a maddening combination
+# that looks like "the counter is protected but the payload is folded in some
+# other way". It is not. It is one ordinary CRC over a region with a hole in it.
+#
+# HOW IT WAS FOUND, because guessing CRC parameters never would have: solve the
+# check field as a GF(2) linear system over the individual bits of the four
+# bytes that vary across 79 report frames. The solution reproduces every frame,
+# and its per-bit contributions are visibly a 0x1021 shift register. Comparing
+# each byte's EFFECTIVE tail against its POSITIONAL tail then showed a constant
+# 2-byte discrepancy for bytes before the check field and none after it.
 #
 # ---------------------------------------------------------------------------
 # HOW TO USE IT TO MAP THE REMAINING FIELDS
@@ -185,6 +202,10 @@ globals:
     initial_value: '0'
   - id: reject_count
     type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: crc_fail_count
+    type: int
     restore_value: no
     initial_value: '0'
 
@@ -317,6 +338,17 @@ sensor:
     accuracy_decimals: 0
     update_interval: never
 
+  # Frames whose CRC-16/XMODEM did not match. Distinct from "Rejected", which
+  # counts implausible length bytes. This should stay at zero; anything else
+  # means real corruption on the tap rather than a decoder bug.
+  - platform: template
+    name: "CRC Failures"
+    id: ac_crc_fails
+    icon: mdi:alert-outline
+    state_class: total_increasing
+    accuracy_decimals: 0
+    update_interval: never
+
 binary_sensor:
   # Field 0x13. Command is `13=01`; the AC echoes `DF 01 00 13 01`.
   - platform: template
@@ -423,6 +455,33 @@ interval:
             }
 
             if (v.size() < 8 || v.size() != (size_t) v[7]) continue;
+
+            // ---- CHECKSUM: CRC-16/XMODEM ----
+            // poly 0x1021, init 0x0000, MSB-first, no final XOR.
+            // The region is the whole frame with bytes 8-9 (the check field)
+            // *** REMOVED, not zeroed ***. That distinction is the entire
+            // puzzle: zeroing them leaves two extra bytes in the shift
+            // register, which makes the counter appear to fit at a tail two
+            // shorter than its position while the payload never fits at all.
+            // Verified on 105 frames, every length 12-90, both directions.
+            {
+              uint16_t c = 0x0000;
+              for (size_t k = 0; k < v.size(); k++) {
+                if (k == 8 || k == 9) continue;      // skip the check field
+                c ^= (uint16_t) v[k] << 8;
+                for (int i = 0; i < 8; i++)
+                  c = (c & 0x8000) ? (uint16_t)((c << 1) ^ 0x1021)
+                                   : (uint16_t)(c << 1);
+              }
+              uint16_t want = ((uint16_t) v[8] << 8) | v[9];
+              if (c != want) {
+                ESP_LOGW(TAG, "%s CRC BAD  want %04X got %04X", dir, want, c);
+                id(crc_fail_count)++;
+                id(ac_crc_fails).publish_state(id(crc_fail_count));
+                v.clear();
+                continue;
+              }
+            }
 
             // ---- complete frame ----
             std::string hex;

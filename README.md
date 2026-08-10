@@ -12,9 +12,11 @@ power, mode, setpoint, room temperature, fan speed, blower RPM.
 
 This documents that bus.
 
-> **Status: read-only, and honest about it.** The listener decodes live state
-> today. Writing to the bus is *not* implemented — the frame checksum is still
-> unsolved. See [Where this stops](#where-this-stops).
+> **Status: read-only by choice, not by limitation.** The listener decodes live
+> state today and verifies every frame's CRC. The checksum is **solved**
+> (CRC-16/XMODEM — see [`PROTOCOL.md`](PROTOCOL.md)) and the command format is
+> known, so transmit is now a wiring decision rather than a research problem.
+> It is still deliberately not wired. See [Where this stops](#where-this-stops).
 
 ## The protocol is not the one every guide says it is
 
@@ -31,7 +33,7 @@ evening.
 | Parity | **8E1** | 8N1 | — | **8N1** |
 | Header | `0xBB` | `0xAA` | `55 AA` | **`0xA5`** |
 | Length | fixed 31 B | length byte | length byte | **length byte, 12–93 B** |
-| Checksum | XOR of preceding | 8-bit sum | 8-bit sum | **16-bit, unsolved** |
+| Checksum | XOR of preceding | 8-bit sum | 8-bit sum | **CRC-16/XMODEM over a region with a hole in it** |
 | Handshake | none | none | none | **counter + explicit ACK** |
 
 The module is **Tuya silicon running TCL firmware** — a Tuya WBR1 (RTL8720CF)
@@ -182,47 +184,23 @@ and then deliberately left alone.
 
 ## Where this stops
 
-**The check field is CRC-16/CCITT `0x1021`** — polynomial derived from the data,
-and **fully solved for ACK frames** (region `[0:10]`, init `0x28C8` one way and
-`0xD07E` the other, verified on 39 frames). The region and init for the longer
-report frames are still open.
+**Nothing structural is unsolved any more.** Framing, message types, the ACK
+handshake, record encoding, the command format and the checksum are all
+documented and verified.
 
-**The command format is known**: commands are `0A 0A` payloads, structurally
-identical to reports. See [`PROTOCOL.md`](PROTOCOL.md).
+What remains is deliberate:
 
-Older notes on the failed approaches follow, kept because they save repeating
-them:
-
-It is not a textbook CRC16. Attacks that failed, so you do not repeat them:
-
-- All standard CRC16 polynomials (`0x1021`, `0x8005`, `0x3D65`, `0xA001`,
-  `0x8408`, `0x0589`, `0xC867`), both bit orders, both byte orders.
-- Every contiguous span and end-offset, with the check field zeroed and not.
-- Solving `init` by GF(2) linear algebra across 16 clean frames from both
-  directions simultaneously.
-
-What *is* known, and is the thread worth pulling:
-
-- The field is **linear over GF(2)** with respect to the counter byte —
-  `chk(1)^chk(3) == chk(5)^chk(7)` exactly. That is a CRC's signature.
-- The counter's contribution matches **CRC-16/CCITT (`0x1021`) exactly**, at a
-  tail length placing the region end at `len-2`, verified on a pair of frames
-  with byte-identical payloads.
-- **Payload changes do not follow the same rule.** No contiguous region
-  reproduces them.
-
-So the counter is protected by something CRC-1021-shaped and the payload is
-folded in some other way. Someone with fresh eyes may see it immediately.
-
-Receiving does not need it — header, length byte and the ACK counter echo frame
-the stream reliably. Transmitting does.
+- **Transmit is not wired.** GPIO17 goes nowhere. This is a ceiling-mounted
+  appliance whose harness has to be cut to tap, and the failure mode for a bad
+  frame involves a ladder and a teardown. Everything needed to transmit is in
+  [`PROTOCOL.md`](PROTOCOL.md); connecting it is a decision, not a discovery.
+- **Mode values are exposed raw.** `0x12` is 0–4 and which is which was never
+  confirmed. Guessing produces an entity that heats when asked to cool.
+- **`0x3D`** cycles 0/1/2 in clock frames with no observed trigger. Unidentified
+  and low-value.
+- **A blower-outlet thermistor** may exist but has never appeared on the bus.
 
 ## Roadmap
-
-**Solve the check field.** Everything else waits on it — see
-[the state of play](#where-this-stops). More frames with varied payloads is
-exactly what that analysis was short of, and the listener now collects them
-continuously.
 
 **Map the mode values** to auto / cool / dry / fan / heat by observation.
 
@@ -242,6 +220,8 @@ README.md                    this file
 PROTOCOL.md                  wire format and field map
 METHOD.md                    how it was decoded, and the dead ends
 esphome/aciq-listen.yaml     the listener
+CLAUDE.md                    conventions and evidence standards for this repo
+tools/crc.py                 checksum: verify, compute, apply
 tools/decode_csv.py          Kingst LA1010 CSV -> frames
 tools/decode_bin.py          Kingst LA1010 binary -> frames
 tools/README.md              analyser settings that work
