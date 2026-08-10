@@ -84,8 +84,9 @@ Live Home Assistant sensors, decoded from the appliance's own reporting:
 | Fan Speed | field `0x05` | 1–7, and **0 = auto** |
 | Fan Percent | field `0x72` | 1 / 25 / 40 / 55 / 70 / 85 / 100 |
 | Indoor Coil Temperature | field `0x5C` | Evaporator; 10–13 °C while cooling |
-| Outdoor Temperature | field `0x60` | Cross-checked against an independent outdoor sensor |
-| Compressor Speed | field `0xC0` | 0 when off. Percent vs Hz not yet settled |
+| Outdoor Temperature | field `0x60` | Ambient air, confirmed under compressor load |
+| Compressor Target | field `0xC0` | Commanded speed, % |
+| Compressor Actual | field `0x65` | Ramps to meet the target, % |
 | Power Usage | field `0x64` | Watts; corroborated by the app's own power tracker |
 | Frames Decoded / Rejected | — | Health check. Rejected should stay at zero |
 | Last Frame / Unknown Fields | — | The mapping queue for anything not yet identified |
@@ -212,10 +213,6 @@ the stream reliably. Transmitting does.
 [the state of play](#where-this-stops). More frames with varied payloads is
 exactly what that analysis was short of, and the listener now collects them
 continuously.
-
-**Settle whether `0x60` is outdoor air or outdoor coil.** It reads plausibly
-either way; an overnight log distinguishes them, since air falls steadily and a
-coil jumps with compressor cycles.
 
 **Map the mode values** to auto / cool / dry / fan / heat by observation.
 

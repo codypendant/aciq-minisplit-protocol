@@ -108,9 +108,10 @@ remainder as 2-byte records, skipping 6 bytes whenever a wide id appears.
 | `0x5C` | **Indoor coil temperature** | centi-°C | 10–13 °C while cooling; warms to ambient when off |
 | `0x0E` | Vertical airflow | 1 byte | 8 positions per the app |
 | `0x11` | Horizontal airflow | 1 byte | 9 positions per the app; observed set is exactly `01 02 03 08 09 0A 0B 0C 0D` |
-| `0x60` | **Outdoor temperature** | centi-°C | Cross-checked against an independent outdoor sensor |
+| `0x60` | **Outdoor AIR temperature** | centi-°C | Read 89.6–91.4 °F while the compressor pulled 850 W — a condensing coil would be 115–130 °F under that load |
 | `0x64` | **Input power** | 16-bit, W | 620–930 at partial load, 0 when off. The app has a power-usage tracker, so the unit must report this |
-| `0xC0` | **Compressor speed** | 16-bit | 30–82 running, **exactly 0** when off. Units unsettled — see below |
+| `0xC0` | **Compressor target** | 16-bit, % | Commanded speed. Jumps straight to value on start |
+| `0x65` | **Compressor actual** | 16-bit, % | Ramps up to meet `0xC0` |
 | `0x41`, `0x42` | Unix timestamps | 32-bit | In `0D 0D` clock frames |
 
 ### The unit thinks in Celsius
@@ -135,7 +136,6 @@ not conclusions.**
 
 | Id | Values seen | Hypothesis |
 |---|---|---|
-| `0x65` | 0–66, **0 when off** | Pairs with `0xC0`. Target vs actual speed, or compressor vs air handler — both are 0–100% settable on this unit |
 | `0x06` | `40`, `A4` | — |
 | `0x13`, `0x15`, `0xDF` | 0/1 toggles | Feature flags |
 | `0x38`, `0x3D`, `0x74`, `0x95`, `0xA4`, `0xBD`–`0xBF` | mostly constant | — |
@@ -160,34 +160,25 @@ unit is off. **This unit is a multi-speed DC inverter** — a fixed-speed
 compressor would report one running value or zero, whereas the observed
 30 / 38 / 40 / 42 / 48 / 66 / 82 is continuous modulation.
 
-### Percent or Hz? Not settled
+### Target and actual — settled
 
-Both readings fit and it is worth not guessing:
+`0xC0` is the **commanded** compressor speed and `0x65` is the **actual**. A
+cold start makes this unambiguous:
 
-- **Percent.** The unit's compressor and air handler each accept a **0–100%
-  speed**, and every value observed from `0xC0` and `0x65` is **≤ 100**.
-- **Hz.** 30–82 Hz is a textbook inverter operating range.
+```
+0xC0 -> 86        target jumps straight to its value
+0x65 = 18         actual begins ramping
+0x65 = 37 -> 50 -> 64 -> 86     reaches target after ~45 s
+0xC0 -> 82        target eases back
+0x65 = 82         actual follows
+```
 
-`0x65` behaves identically — 0–66 running, 0 when off — so the pair is most
-likely **target and actual**, or **compressor and air handler**.
+**Units are percent, not Hz.** Both cap near 86, the app exposes a 0–100% speed
+for the compressor and air handler, and actual chases commanded the way a
+servo-tracked percentage does.
 
-**The experiment that settles it:** the compressor on this unit **starts at 1%
-and ramps up** from a cold start. So power the unit off, wait, and power it on
-with the listener running:
-
-- A field that **starts near 1 and climbs** is the **0–100% speed**.
-- A field that **jumps straight to ~30 and climbs from there** is **Hz** — that
-  floor is the compressor's minimum operating frequency, below which an inverter
-  will not run at all.
-
-Current evidence leans Hz for `0xC0`: it has **never been observed below 30
-while running**, and at one captured power-on it went 0 → 44 within about three
-seconds, which is not what a 1% ramp looks like. That is one observation, so it
-is a lean, not a conclusion.
-
-Until a power-on ramp is captured the listener publishes `0xC0` as a
-percentage and labels it unconfirmed — deliberately the more conservative
-choice, since a wrong unit on a diagnostic is cheaper than a wrong scale.
+Input power tracks the ramp exactly — 130 → 260 → 420 → 660 → 840 → 910 W,
+settling near 850 W.
 
 **Knowing the unit is an inverter narrows the remaining unknowns**, because a
 variable-speed machine reports things a fixed-speed one does not: speed or

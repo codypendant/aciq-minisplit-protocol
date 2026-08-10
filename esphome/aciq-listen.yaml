@@ -237,6 +237,17 @@ sensor:
     accuracy_decimals: 1
     update_interval: never
 
+  # Field 0x65 -- what the compressor is ACTUALLY doing. Ramps to meet the
+  # target; the gap between the two is the machine spooling up.
+  - platform: template
+    name: "Compressor Actual"
+    id: ac_compressor_actual
+    unit_of_measurement: "%"
+    icon: mdi:air-conditioner
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: never
+
   # Field 0x64. The app exposes a power-usage tracker, so the unit reports this
   # somewhere; 0x64 is the only field shaped like watts.
   - platform: template
@@ -248,10 +259,9 @@ sensor:
     accuracy_decimals: 0
     update_interval: never
 
-  # Field 0xC0. Reads 0 whenever the unit is off. Units unconfirmed -- see the
-  # note in the lambda; percent is the better-supported reading, not Hz.
+  # Field 0xC0 -- what the unit is ASKING the compressor to do.
   - platform: template
-    name: "Compressor Speed"
+    name: "Compressor Target"
     id: ac_compressor
     unit_of_measurement: "%"
     icon: mdi:air-conditioner
@@ -424,7 +434,7 @@ interval:
                 // centi-Celsius reading alongside, so a thermistor is obvious.
                 switch (v[i]) {
                   case 0x02: case 0x03: case 0x05: case 0x5C:
-                  case 0x60: case 0x64: case 0x72: case 0xC0:
+                  case 0x60: case 0x64: case 0x65: case 0x72: case 0xC0:
                     break;                      // already understood
                   default: {
                     char t[48];
@@ -476,18 +486,23 @@ interval:
                       mapped = true;
                     }
                     break;
+                  case 0x65:   // ACTUAL compressor speed, percent. Ramps up to
+                               // meet 0xC0. Observed 18 -> 37 -> 50 -> 64 -> 86
+                               // over ~45 s from a cold start while 0xC0 sat at
+                               // 86 the whole time, then both settled at 82.
+                    if (val <= 100) {
+                      id(ac_compressor_actual).publish_state(val);
+                      mapped = true;
+                    }
+                    break;
                   case 0xC0:   // Compressor speed. Ran 30-82 while cooling and
                                // went to EXACTLY 0 the moment power was
                                // switched off.
-                               // UNITS NOT SETTLED. This unit is a DC inverter
-                               // whose compressor and air handler both accept a
-                               // 0-100% speed, and every observed value is <=
-                               // 100 -- so percent fits. 30-82 Hz would also be
-                               // a textbook inverter range. 0x65 behaves
-                               // identically and is likely the target/actual
-                               // counterpart. Distinguish by commanding a known
-                               // percentage in the app and seeing which field
-                               // lands on it exactly.
+                               // SETTLED as COMMANDED (target) speed in PERCENT.
+                               // On a cold start it jumps straight to its value
+                               // while 0x65 ramps up to meet it -- target/actual.
+                               // Percent, not Hz: both cap near 86 and the app
+                               // exposes a 0-100% speed.
                     if (val <= 200) {
                       id(ac_compressor).publish_state(val);
                       mapped = true;
