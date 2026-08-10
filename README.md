@@ -83,7 +83,9 @@ Live Home Assistant sensors, decoded from the appliance's own reporting:
 | Mode | field `0x12` | Raw 0–4; see [the caveat](#the-mode-names-are-deliberately-not-mapped) |
 | Fan Speed | field `0x05` | 1–7, and **0 = auto** |
 | Fan Percent | field `0x72` | 1 / 25 / 40 / 55 / 70 / 85 / 100 |
-| Blower RPM | field `0x5C` | 1400–2300 observed |
+| Blower RPM | field `0x5C` | 1000–2300 observed |
+| Outdoor Temperature | field `0x60` | Cross-checked against an independent outdoor sensor |
+| Compressor | field `0xC0` | 0 when off |
 | Frames Decoded / Rejected | — | Health check. Rejected should stay at zero |
 | Last Frame / Unknown Fields | — | The mapping queue for anything not yet identified |
 
@@ -210,10 +212,9 @@ the stream reliably. Transmitting does.
 exactly what that analysis was short of, and the listener now collects them
 continuously.
 
-**Find the outdoor coil temperature.** The unit is a heat pump and has an
-outdoor coil sensor. If it is on this bus it will be centi-°C like `0x02` and
-`0x03`, so the hunt is for an unmapped wide field reading ~3000–5500 in summer
-that swings with the compressor rather than with a button press.
+**Settle whether `0x60` is outdoor air or outdoor coil.** It reads plausibly
+either way; an overnight log distinguishes them, since air falls steadily and a
+coil jumps with compressor cycles.
 
 **Map the mode values** to auto / cool / dry / fan / heat by observation.
 

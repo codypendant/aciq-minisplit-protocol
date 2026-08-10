@@ -82,7 +82,13 @@ Some fields instead carry a 32-bit value:
 Walking those as 2-byte records splits them and **invents a phantom field**.
 Room temperature first appeared as a bogus `0A=D2` for precisely this reason.
 
-Known wide fields: `0x02`, `0x03`, `0x5C`, `0x64`, `0xC0`.
+Known wide fields: `0x02`, `0x03`, `0x5C`, `0x60`, `0x64`, `0x65`, `0x72`,
+`0xC0`.
+
+**Symptom worth memorising:** a value that publishes as a constant **0** is
+usually a wide field being parsed as narrow. Fan percent (`0x72`) did exactly
+this until the live log showed `72 00 00 00 19` — the 25 was three bytes further
+along than a 1-byte read looks.
 
 Parse wide fields first by scanning for `<id> 00 00 <hi> <lo>`, then walk the
 remainder as 2-byte records, skipping 6 bytes whenever a wide id appears.
@@ -102,6 +108,8 @@ remainder as 2-byte records, skipping 6 bytes whenever a wide id appears.
 | `0x5C` | Blower RPM | 16-bit | 1400–2300 observed |
 | `0x0E` | Vertical airflow | 1 byte | 8 positions per the app |
 | `0x11` | Horizontal airflow | 1 byte | 9 positions per the app; observed set is exactly `01 02 03 08 09 0A 0B 0C 0D` |
+| `0x60` | **Outdoor temperature** | centi-°C | Cross-checked against an independent outdoor sensor |
+| `0xC0` | **Compressor** | 16-bit | 30–82 running, **exactly 0** when off. Units assumed Hz |
 | `0x41`, `0x42` | Unix timestamps | 32-bit | In `0D 0D` clock frames |
 
 ### The unit thinks in Celsius
@@ -126,23 +134,30 @@ not conclusions.**
 
 | Id | Values seen | Hypothesis |
 |---|---|---|
-| `0xC0` | 44, 41, 0 | **Compressor frequency (Hz)** — reads 0 when the unit is off |
+| `0x65` | 0–66, **0 when off** | Second compressor metric — target vs actual frequency? current? |
 | `0x64` | 930, 890, 850, 620 | Power (W)? outdoor fan RPM? |
 | `0x06` | `40`, `A4` | — |
 | `0x13`, `0x15`, `0xDF` | 0/1 toggles | Feature flags |
 | `0x38`, `0x3D`, `0x74`, `0x95`, `0xA4`, `0xBD`–`0xBF` | mostly constant | — |
 
-**Wanted: outdoor coil temperature.** The hardware has one — the unit is a heat
-pump with an outdoor coil sensor, as its siblings do. If it is on this bus it
-will almost certainly be **centi-°C like `0x02` and `0x03`**, so look for an
-unmapped wide field reading roughly **3000–5500** in summer (30–55 °C on a hot
-outdoor coil) and dropping sharply when the compressor stops. `0xC0` at 44/41/0
-is *not* it — those track compressor state, not a plausible coil temperature in
-centi-°C.
+**Outdoor temperature was field `0x60`**, found exactly this way — it is
+centi-°C like `0x02` and `0x03`, and it was confirmed by comparing against a
+*different* outdoor sensor elsewhere on the same property at the same moment:
 
-Cheapest way to find it: run the listener across a compressor cycle and watch
-which unmapped field swings with condensing temperature rather than with a
-button press.
+| `0x60` | °C | °F | independent sensor |
+|---|---|---|---|
+| `0x0D48` | 34.00 | 93.2 | — |
+| `0x0CE4` | 33.00 | 91.4 | — |
+| `0x0C80` | 32.00 | 89.6 | 92.3 °F |
+
+**Open question: outdoor AIR or outdoor COIL?** The absolute value suggests air;
+the observed oscillation between 3300 and 3400 suggests coil. The discriminator
+is overnight behaviour — **air falls steadily through the night, a coil jumps
+with compressor cycles.** Worth an overnight log before trusting the label.
+
+`0xC0` is *not* a temperature: it runs 30–82 and reads exactly 0 whenever the
+unit is off, so it tracks compressor state. `0x65` behaves the same way and is
+still unidentified.
 
 ## Behaviour worth exploiting
 
