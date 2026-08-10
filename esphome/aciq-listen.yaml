@@ -307,6 +307,11 @@ sensor:
     update_interval: never
 
 binary_sensor:
+  # Field 0x73. Set together with fan speed 0.
+  - platform: template
+    name: "Fan Auto"
+    id: ac_fan_auto
+    icon: mdi:fan-auto
   # Field 0x01. The AC emits a full 66/90/72-byte state dump immediately after
   # each power-ON -- useful later, as it is exactly when a freshly booted
   # ESP32 would otherwise have to ask for state.
@@ -344,6 +349,14 @@ text_sensor:
     icon: mdi:thermometer-lines
     update_interval: never
 
+  # Commands seen on the module's transmit line (0A 0A payloads) -- what the
+  # app or remote ASKED for, as opposed to what the AC reports.
+  - platform: template
+    name: "Last Command"
+    id: ac_last_command
+    icon: mdi:send
+    update_interval: never
+
   # Decoded records whose field id has no meaning assigned yet, as `id=val`
   # pairs. POWER and ROOM TEMPERATURE are the two that still matter -- watch
   # this while toggling power, and watch it drift over hours for the sensor.
@@ -362,6 +375,7 @@ interval:
           static std::string prev_unmapped;
           static std::string prev_fields;
           static std::string prev_wide;
+          static std::string prev_cmd;
 
           // Two receive-only taps. ch 0 = RED (AC), ch 1 = BLACK (module).
           // Indexed rather than pointer-typed so this stays plain ESPHome API.
@@ -425,6 +439,29 @@ interval:
             // (`<id> 00 00 <hi> <lo> 00`). The generic 2-byte walk below
             // mislabels those -- it reported room temperature as a phantom
             // "0A=D2" field. Scan for the wide form explicitly first.
+            // ---- COMMAND frames: payload header 0A 0A ----
+            // Same frame type and same TLV records as a report; only the
+            // payload header distinguishes them.
+            //   0C 0C = state report (the AC telling us what IS)
+            //   0A 0A = command      (the module asking for a CHANGE)
+            //   0D 0D = clock
+            // Commands are requests, so nothing here publishes state -- the
+            // AC's own report a moment later is the authority.
+            if (v[3] == 0x21 && n >= 15 && v[10] == 0x0A && v[11] == 0x0A) {
+              std::string cmd;
+              for (size_t i = 13; i + 1 < n; i += 3) {
+                char t[24];
+                sprintf(t, "%02X=%02X ", v[i], v[i+1]);
+                cmd += t;
+              }
+              if (!cmd.empty() && cmd != prev_cmd) {
+                prev_cmd = cmd;
+                id(ac_last_command).publish_state(cmd);
+              }
+              ESP_LOGI(TAG, "  COMMAND: %s", cmd.c_str());
+              mapped = true;
+            }
+
             std::string wide;
             if (v[3] == 0x21 && n >= 18 && v[10] == 0x0C && v[11] == 0x0C) {
               for (size_t i = 13; i + 4 < n; i++) {
@@ -572,6 +609,13 @@ interval:
                   case 0x11:   // left/right flow
                   case 0x0C:   // per-axis enable companions
                   case 0x0D:
+                  case 0x73:   // FAN AUTO flag. Manual speeds send 73=00;
+                               // auto sends 73=01 together with 05=00. That is
+                               // why "fan auto" looked like speed zero -- it is
+                               // a flag plus a speed, not a speed value.
+                    id(ac_fan_auto).publish_state(val != 0);
+                    mapped = true;
+                    break;
                   case 0x0A:   // phantom -- the low half of a wide field that
                                // the 2-byte walk splits. Handled above.
                     mapped = true;

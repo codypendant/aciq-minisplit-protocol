@@ -51,10 +51,33 @@ MOD  A5 01 01 23 00 99 00 0C 24 4E 80 0C                            +50.1 ms
 ACKs are always 12 bytes and carry no state. The turnaround was 49.3–50.2 ms
 across every exchange observed.
 
+**The ACK's last byte echoes the payload type it is acknowledging** — `80 0A`
+for a command, `80 0C` for a report, `80 0D` for clock. Each side runs its own
+independent counter sequence.
+
+## Commands
+
+A command is **structurally identical to a report** — same type `0x21`, same TLV
+records. Only the payload header differs. Real captures:
+
+```
+A5 01 01 21 1E 00 00 12 C2 F0 0A 0A 00 13 00 00 01 01    power ON
+A5 01 01 21 20 00 00 12 2E 69 0A 0A 00 73 00 00 05 06    fan speed 6
+A5 01 01 21 25 00 00 12 50 2F 0A 0A 00 73 00 00 05 01    fan speed 1
+A5 01 01 21 26 00 00 12 33 25 0A 0A 00 73 01 00 05 00    fan AUTO
+```
+
+**`0x73` is the fan AUTO flag.** Manual speeds send `73=00`; auto sends `73=01`
+*together with* `05=00`. Fan auto is a flag plus a speed, not a speed value —
+which is why it first looked like "speed 0".
+
 ## Payload
 
 ```
-frame[10:12]   payload header: `0C 0C` normally, `0D 0D` for clock frames
+frame[10:12]   payload header -- THIS is what distinguishes a command:
+                 `0C 0C` = state report   (AC -> module)
+                 `0A 0A` = COMMAND        (module -> AC)
+                 `0D 0D` = clock
 frame[12]      00
 frame[13:]     records
 ```
@@ -274,7 +297,32 @@ and short frames when something moves.
 
 ## The check field
 
-**Unsolved.** Bytes 8–9, big-endian, deterministic — identical frames always
+**Polynomial confirmed: CRC-16/CCITT `0x1021`, MSB-first.** Derived from the
+data rather than guessed — the counter bit deltas on the ACK family are
+`bit0 = AA51`, `bit1 = 4483`, `bit2 = 8906`. Since `0x4483 << 1 = 0x8906`, and
+`0xAA51 << 1` overflows to `0x54A2` which XORed with `0x4483` yields `0x1021`,
+that is a textbook CCITT shift register.
+
+### Solved for ACK frames
+
+```
+poly    0x1021, MSB-first
+region  ACK bytes [0:10], check field (8,9) zeroed
+init    0x28C8   AC  ACKs, trailing 80 0A   -- verified on 9 frames
+init    0xD07E   MOD ACKs, trailing 80 0C   -- verified on 30 frames
+```
+
+Two inits because the trailing type byte folds in as a per-direction constant.
+
+**Why ACKs cracked it when nothing else did:** they are 12 bytes differing in
+**exactly one byte** — the echoed counter. Every earlier attempt used frames
+where two or more bytes moved together, leaving the linear system
+underdetermined. **When attacking a checksum, find the frame family with a
+single varying byte.** That family had been in every capture all along.
+
+### Still unsolved for the longer report frames
+
+Region and init are not yet pinned for `0C 0C` reports. Bytes 8–9, big-endian, deterministic — identical frames always
 produce identical values.
 
 Ruled out: all standard CRC16 polynomials (`0x1021`, `0x8005`, `0x3D65`,

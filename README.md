@@ -181,7 +181,16 @@ and then deliberately left alone.
 
 ## Where this stops
 
-**The 16-bit check field at bytes 8–9 is unsolved.**
+**The check field is CRC-16/CCITT `0x1021`** — polynomial derived from the data,
+and **fully solved for ACK frames** (region `[0:10]`, init `0x28C8` one way and
+`0xD07E` the other, verified on 39 frames). The region and init for the longer
+report frames are still open.
+
+**The command format is known**: commands are `0A 0A` payloads, structurally
+identical to reports. See [`PROTOCOL.md`](PROTOCOL.md).
+
+Older notes on the failed approaches follow, kept because they save repeating
+them:
 
 It is not a textbook CRC16. Attacks that failed, so you do not repeat them:
 
