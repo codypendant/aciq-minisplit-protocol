@@ -323,6 +323,14 @@ sensor:
     update_interval: never
 
   - platform: template
+    name: "Sleep (raw)"
+    id: ac_sleep_raw
+    icon: mdi:weather-night
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
     name: "Frames Decoded"
     id: ac_frames
     icon: mdi:counter
@@ -406,6 +414,15 @@ text_sensor:
     id: ac_caps
     icon: mdi:format-list-bulleted
     entity_category: diagnostic
+    update_interval: never
+
+  # Field 0x22 rendered as a name. All four values confirmed from command
+  # frames; the raw value stays published because a name can be wrong and a
+  # number cannot.
+  - platform: template
+    name: "Sleep Mode"
+    id: ac_sleep_name
+    icon: mdi:weather-night
     update_interval: never
 
   # Field 0x12 rendered as a name. The raw integer is kept alongside it
@@ -835,6 +852,29 @@ interval:
                                // a single state dump -- 0E=08 set it, a real
                                // 13=00 cleared it, then 0C=1C set it again.
                     mapped = true;
+                    break;
+                  case 0x22:   // SLEEP -- an ENUM, not a boolean, and that
+                               // distinction was nearly missed. One toggle gave
+                               // `01` then `00`, which looks exactly like a
+                               // flag; the app screen showing three variants is
+                               // what prompted checking. All four values then
+                               // came straight from command frames:
+                               //   0 off   1 standard   2 the aged   3 child
+                               // Manual note: rejected in FAN and DRY mode, so
+                               // a write may be silently ignored.
+                    {
+                      static const char *const SLEEP[4] =
+                          {"off", "standard", "the aged", "child"};
+                      id(ac_sleep_raw).publish_state(val);
+                      if (val < 4) {
+                        id(ac_sleep_name).publish_state(SLEEP[val]);
+                      } else {
+                        char b[24];
+                        sprintf(b, "unmapped (%u)", (unsigned) val);
+                        id(ac_sleep_name).publish_state(b);
+                      }
+                      mapped = true;
+                    }
                     break;
                   case 0x13:   // ECO MODE. Command `13=01` captured directly:
                                // the AC confirmed with `DF 01 00 13 01` and the

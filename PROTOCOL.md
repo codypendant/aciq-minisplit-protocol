@@ -100,6 +100,27 @@ report, so a command parser must skip wide fields too. A flat 3-byte stride
 renders the setpoint record `02 00 00 0A 8C` as `02=00` plus a phantom `0A=8C`:
 a real field with the wrong value, and a field that does not exist.
 
+### Sleep is an enum, and nearly wasn't
+
+`0x22` was one toggle away from being documented as a boolean. Pressing Sleep on
+and off gave `22=01` then `22=00` — indistinguishable from a flag. The app's own
+screen showing **three** variants is what prompted a second look, and the
+remaining values came straight from command frames:
+
+| value | app label |
+|---|---|
+| `0` | off |
+| `1` | Standard |
+| `2` | The aged |
+| `3` | Child |
+
+**Generalise the trap:** a two-sample toggle can only ever prove a field has at
+least two states. It cannot prove there are exactly two. Before calling anything
+a flag, either exercise every control the UI offers or expose the raw value.
+
+`0x22` also appears in the `0x39` capability list, which is the first
+confirmation that the list enumerates real feature ids.
+
 ### Mode values — verified, not inferred
 
 Mapped by pressing each mode in the app and reading the command frame it
