@@ -237,6 +237,40 @@ Setpoint steps are **0.50 °C**, and the trailing °F byte on setpoint frames is
 `centi_c = 2700 + (degF − 81) × 50`. A plain °F→°C conversion lands between
 steps.
 
+### `0x39` is a length-prefixed list, not a record
+
+```
+00 39 12 | 02 03 07 08 09 0B 15 17 1C 1F 21 22 23 24 27 28 2A 31 | 00 5E ...
+      ^^   \________________ exactly 0x12 = 18 bytes ___________/
+```
+
+Field id, then a **length byte**, then that many payload bytes, then the usual
+separator. Consumed length is `len + 3`.
+
+**Walked as 3-byte records it manufactures seven phantom fields** — `39=12
+03=07 09=0B 17=1C 21=22 24=27 2A=31` — which sit in the unmapped queue looking
+like real work. Worse, the record stream only stays aligned here by luck:
+`2 + 18 + 1 = 21` happens to divide by three. **A list of any other length
+desynchronises the entire rest of the frame.** Any decoder for this protocol
+needs to handle `0x39` explicitly.
+
+The contents are identical in every full-state dump, so it is a static table.
+Cross-referencing it against everything observed:
+
+| in the list | status |
+|---|---|
+| `02` `03` | known fields — setpoint, room temperature |
+| `15` `17` `22` `27` | seen as fields, meaning unknown |
+| `21` `22` `24` `27` | seen under the `02` parameter prefix |
+| `07` `08` `09` `0B` `1C` `1F` `23` `28` `2A` `31` | **never observed in any frame** |
+
+Ten of eighteen entries have never appeared on the bus at all. That is the
+interesting part: if this is a supported-capability table, those ten are
+functions the unit implements that simply have not been exercised yet.
+
+**It is not established what the list enumerates** — it spans both the field and
+the `02` parameter namespaces, so it is a lead rather than a conclusion.
+
 ### Not yet identified
 
 These appear as wide fields with plausible engineering values. **Candidates,

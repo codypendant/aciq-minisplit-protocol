@@ -398,6 +398,16 @@ text_sensor:
     icon: mdi:thermometer-lines
     update_interval: never
 
+  # Field 0x39 -- a length-prefixed list, constant across every state dump.
+  # Most likely the set of parameters this unit supports. Exposed raw because
+  # what it enumerates is not yet confirmed.
+  - platform: template
+    name: "Capability List"
+    id: ac_caps
+    icon: mdi:format-list-bulleted
+    entity_category: diagnostic
+    update_interval: never
+
   # Field 0x12 rendered as a name. The raw integer is kept alongside it
   # deliberately: the mapping is verified, but the raw value cannot be wrong.
   - platform: template
@@ -433,6 +443,7 @@ interval:
           static std::string prev_fields;
           static std::string prev_wide;
           static std::string prev_cmd;
+          static std::string prev_caps;
 
           // Two receive-only taps. ch 0 = RED (AC), ch 1 = BLACK (module).
           // Indexed rather than pointer-typed so this stays plain ESPHome API.
@@ -749,6 +760,43 @@ interval:
                   i += 6;
                   continue;
                 }
+
+                // 0x39 is a LENGTH-PREFIXED LIST, not a normal record:
+                //
+                //   00 39 12 | 02 03 07 08 09 0B 15 17 1C 1F 21 22 23 24 27 28 2A 31 | 00 5E ...
+                //         ^^   \_______________ exactly 0x12 = 18 bytes ___________/
+                //
+                // Walked as 3-byte records it produced a stream of phantom
+                // fields (`39=12 03=07 09=0B 17=1C 21=22 24=27 2A=31`) that
+                // sat in Unknown Fields looking like real unmapped work.
+                // Alignment survived only by luck: 2 + 18 + 1 = 21 is divisible
+                // by three, so the records AFTER the list still landed right.
+                // A list of any other length would have desynchronised the
+                // rest of the frame.
+                //
+                // Contents are constant across every full-state dump, so this
+                // is a static table -- most likely the parameters this unit
+                // supports rather than anything live.
+                if (fid == 0x39 && i + 1 < n) {
+                  uint8_t len = v[i + 1];
+                  if (len > 0 && i + 2 + (size_t) len <= n) {
+                    std::string lst;
+                    char t[4];
+                    for (uint8_t k = 0; k < len; k++) {
+                      sprintf(t, "%02X ", v[i + 2 + k]);
+                      lst += t;
+                    }
+                    if (!lst.empty()) lst.pop_back();
+                    if (lst != prev_caps) {
+                      prev_caps = lst;
+                      id(ac_caps).publish_state(lst);
+                    }
+                    mapped = true;
+                    i += (size_t) len + 3;      // fid + len + payload + sep
+                    continue;
+                  }
+                }
+
                 i += 3;
                 switch (fid) {
                   case 0x01:   // POWER -- confirmed: toggled 00/01/00/01
