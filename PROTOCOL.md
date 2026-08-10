@@ -65,7 +65,20 @@ A5 01 01 21 1E 00 00 12 C2 F0 0A 0A 00 13 00 00 01 01    power ON
 A5 01 01 21 20 00 00 12 2E 69 0A 0A 00 73 00 00 05 06    fan speed 6
 A5 01 01 21 25 00 00 12 50 2F 0A 0A 00 73 00 00 05 01    fan speed 1
 A5 01 01 21 26 00 00 12 33 25 0A 0A 00 73 01 00 05 00    fan AUTO
+A5 01 01 21 2F 00 00 0F C7 DD 0A 0A 00 13 01             eco mode ON
 ```
+
+Eco mode is a good worked example of reading a command end to end:
+
+```
+MOD  ... 0A 0A 00 13 01           module asks for eco
+AC   A5 01 01 23 00 2F 00 0C ...  AC acknowledges, 80 0A
+AC   ... 0C 0C 00 DF 01 00 13 01  AC reports the new state
+AC   ... 0C 0C 00 C0 00 00 00 2C  compressor target 86% -> 44%
+```
+
+Command, acknowledgment, state change and physical effect, all on the wire
+within two seconds.
 
 **`0x73` is the fan AUTO flag.** Manual speeds send `73=00`; auto sends `73=01`
 *together with* `05=00`. Fan auto is a flag plus a speed, not a speed value —
@@ -136,6 +149,7 @@ remainder as 2-byte records, skipping 6 bytes whenever a wide id appears.
 | `0x03` | **Room temperature** | centi-°C | **Emitted unprompted every ~60 s** |
 | `0x05` | **Fan speed** | 1 byte | `1`–`7`, **`0` = auto** |
 | `0x12` | **Mode** | 1 byte | `00`–`04`. Which is which: unverified |
+| `0x13` | **Eco mode** | 1 byte | `0`/`1`. `0xDF` moves in lockstep with it |
 | `0x72` | Fan percent | 1 byte | 1 / 25 / 40 / 55 / 70 / 85 / 100, tracks `0x05` |
 | `0x5C` | **Indoor coil temperature** | centi-°C | 10–13 °C while cooling; warms to ambient when off |
 | `0x0E` | Vertical airflow | 1 byte | 8 positions per the app |

@@ -307,6 +307,12 @@ sensor:
     update_interval: never
 
 binary_sensor:
+  # Field 0x13. Command is `13=01`; the AC echoes `DF 01 00 13 01`.
+  - platform: template
+    name: "Eco Mode"
+    id: ac_eco
+    icon: mdi:leaf
+
   # Field 0x73. Set together with fan speed 0.
   - platform: template
     name: "Fan Auto"
@@ -629,6 +635,18 @@ interval:
                   case 0x11:   // left/right flow
                   case 0x0C:   // per-axis enable companions
                   case 0x0D:
+                  case 0x13:   // ECO MODE. Command `13=01` captured directly:
+                               // the AC confirmed with `DF 01 00 13 01` and the
+                               // compressor target fell 86%% -> 44%% within two
+                               // seconds, which is eco doing exactly what it
+                               // claims.
+                    id(ac_eco).publish_state(val != 0);
+                    mapped = true;
+                    break;
+                  case 0xDF:   // Moves in lockstep with 0x13 -- eco's companion
+                               // flag. Explains the DF/13 pairs seen earlier.
+                    mapped = true;
+                    break;
                   case 0x73:   // FAN AUTO flag. Manual speeds send 73=00;
                                // auto sends 73=01 together with 05=00. That is
                                // why "fan auto" looked like speed zero -- it is
