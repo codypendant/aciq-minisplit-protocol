@@ -364,6 +364,30 @@ binary_sensor:
     id: ac_eco
     icon: mdi:leaf
 
+  # App "Light" -- the indoor unit's display LED.
+  - platform: template
+    name: "Display Light"
+    id: ac_light
+    icon: mdi:led-on
+
+  # App "Beep" -- command confirmation tone.
+  - platform: template
+    name: "Beep"
+    id: ac_beep
+    icon: mdi:volume-high
+
+  # App "Health" -- ionizer / purification.
+  - platform: template
+    name: "Health"
+    id: ac_health
+    icon: mdi:leaf-circle
+
+  # App "Drying" -- anti-mildew coil dry after shutdown.
+  - platform: template
+    name: "Drying"
+    id: ac_drying
+    icon: mdi:water-off
+
   # Field 0x73. Set together with fan speed 0.
   - platform: template
     name: "Fan Auto"
@@ -778,6 +802,35 @@ interval:
                   continue;
                 }
 
+                // NAMESPACES. The byte before each id is not a separator,
+                // it is a NAMESPACE selector:
+                //
+                //     <ns> <id> <data...>
+                //      00  plain field        02  parameter        01  seen once
+                //
+                //   00 27 <v>            -> field 0x27 = Drying
+                //   02 27 00 00 00 51    -> parameter 0x27 = setpoint 81 F
+                //
+                // Same id, different meaning. The walk lands on the ID, so the
+                // namespace is the byte BEFORE it. Ignoring this manufactured
+                // every `27=00` and `00=51` ever seen in Unknown Fields.
+                {
+                  uint8_t ns = (i >= 1) ? v[i - 1] : 0x00;
+                  if (ns == 0x02) {
+                    int wdt;
+                    switch (fid) {
+                      case 0x21: case 0x22: case 0x27: case 0x64: wdt = 4; break;
+                      case 0x24: case 0x25:                       wdt = 1; break;
+                      default:                                    wdt = -1; break;
+                    }
+                    if (wdt > 0 && i + 1 + (size_t) wdt <= n) {
+                      mapped = true;
+                      i += 1 + (size_t) wdt + 1;   // id + data + next ns byte
+                      continue;
+                    }
+                  }
+                }
+
                 // 0x39 is a LENGTH-PREFIXED LIST, not a normal record:
                 //
                 //   00 39 12 | 02 03 07 08 09 0B 15 17 1C 1F 21 22 23 24 27 28 2A 31 | 00 5E ...
@@ -851,6 +904,29 @@ interval:
                                // flapped ON/OFF/ON across the three frames of
                                // a single state dump -- 0E=08 set it, a real
                                // 13=00 cleared it, then 0C=1C set it again.
+                    mapped = true;
+                    break;
+                  case 0x1E:   // LIGHT -- the display LED. App toggle,
+                               // confirmed 1E=00 then 1E=01.
+                    id(ac_light).publish_state(val != 0);
+                    mapped = true;
+                    break;
+                  case 0x25:   // BEEP -- key/command confirmation tone.
+                               // Confirmed 25=00 then 25=01.
+                    id(ac_beep).publish_state(val != 0);
+                    mapped = true;
+                    break;
+                  case 0x15:   // HEALTH -- ionizer / air purification.
+                               // Confirmed 15=01 then 15=00.
+                    id(ac_health).publish_state(val != 0);
+                    mapped = true;
+                    break;
+                  case 0x27:   // DRYING -- anti-mildew, dries the coil after
+                               // shutdown. Confirmed 27=01 then 27=00.
+                               // *** NOT the same 0x27 as the `02` parameter,
+                               // which is the setpoint in F. Separate id
+                               // spaces; the prefix is the only difference. ***
+                    id(ac_drying).publish_state(val != 0);
                     mapped = true;
                     break;
                   case 0x22:   // SLEEP -- an ENUM, not a boolean, and that

@@ -178,6 +178,33 @@ frame[12]      00
 frame[13:]     records
 ```
 
+### The byte before each id is a NAMESPACE, not a separator
+
+This was mis-read for the entire project. Records are:
+
+```
+<ns> <id> <data...>
+ 00   plain field
+ 02   parameter
+ 01   observed once, on the 0x47 record
+```
+
+The consequence is not cosmetic — **the same number means different things in
+different namespaces**:
+
+```
+00 27 01               field 0x27      = Drying ON
+02 27 00 00 00 51      parameter 0x27  = setpoint, 81 F
+```
+
+A decoder that ignores the namespace byte and walks a fixed stride lands on the
+id but loses the prefix, then mis-reads the payload as further records. That is
+where every phantom `27=00` and `00=51` in this project came from — and they
+looked exactly like real unmapped fields sitting in the queue.
+
+Parameter payload widths observed: `0x21` `0x22` `0x27` `0x64` are 4 bytes;
+`0x24` `0x25` are 1.
+
 ### Record encoding — widths are schema-dependent
 
 This is the part that bites. **Records are not a uniform stride.**
