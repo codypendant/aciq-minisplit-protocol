@@ -88,6 +88,7 @@ Live Home Assistant sensors, decoded from the appliance's own reporting:
 | Compressor Target | field `0xC0` | Commanded speed, % |
 | Compressor Actual | field `0x65` | Ramps to meet the target, % |
 | Power Usage | field `0x64` | Watts; corroborated by the app's own power tracker |
+| Module WiFi Signal | `02 64` param | dBm, reported by the module itself |
 | Frames Decoded / Rejected | — | Health check. Rejected should stay at zero |
 | Last Frame / Unknown Fields | — | The mapping queue for anything not yet identified |
 

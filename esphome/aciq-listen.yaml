@@ -248,6 +248,17 @@ sensor:
     accuracy_decimals: 0
     update_interval: never
 
+  # The module's own WiFi signal, from the `02 64` heartbeat parameter.
+  - platform: template
+    name: "Module WiFi Signal"
+    id: ac_module_rssi
+    unit_of_measurement: "dBm"
+    device_class: signal_strength
+    state_class: measurement
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: never
+
   # Field 0x64. The app exposes a power-usage tracker, so the unit reports this
   # somewhere; 0x64 is the only field shaped like watts.
   - platform: template
@@ -467,6 +478,28 @@ interval:
               ESP_LOGI(TAG, "  COMMAND: %s", cmd.c_str());
               mapped = true;
             }
+
+            // WiFi RSSI. The module's heartbeat ACK carries an `02 64`
+            // parameter holding a signed 32-bit dBm value:
+            //   A5 01 00 23 ... 80 0C | 02 64 FF FF FF DB   = -37 dBm
+            // Note this is the `02` PARAMETER 0x64, a different namespace
+            // from the AC's field 0x64 (watts).
+            if (v[3] == 0x23 && n >= 18 && v[12] == 0x02 && v[13] == 0x64) {
+              int32_t dbm = ((int32_t) v[14] << 24) | ((int32_t) v[15] << 16) |
+                            ((int32_t) v[16] << 8)  |  (int32_t) v[17];
+              if (dbm < 0 && dbm > -120) {
+                id(ac_module_rssi).publish_state(dbm);
+                mapped = true;
+              }
+            }
+
+            // Clock request (`10 10`) and the `26 26` poll. Understood --
+            // the AC asks, the module answers with unix time. Nothing to
+            // publish, but they must not clutter the mapping queue.
+            if (n >= 12 && ((v[10] == 0x10 && v[11] == 0x10) ||
+                            (v[10] == 0x26 && v[11] == 0x26) ||
+                            (v[10] == 0x80 && v[11] == 0x10)))
+              mapped = true;
 
             // Clock frames. Understood, nothing to publish -- but they must
             // not sit in the mapping queue pretending to be undecoded work.

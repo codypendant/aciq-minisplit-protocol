@@ -52,8 +52,33 @@ ACKs are always 12 bytes and carry no state. The turnaround was 49.3–50.2 ms
 across every exchange observed.
 
 **The ACK's last byte echoes the payload type it is acknowledging** — `80 0A`
-for a command, `80 0C` for a report, `80 0D` for clock. Each side runs its own
-independent counter sequence.
+for a command, `80 0C` for a report, `80 0D` for clock, `80 10` for a clock
+request. Each side runs its own independent counter sequence.
+
+### The module supplies the clock
+
+The AC asks for the time and the module answers with it:
+
+```
+AC   A5 01 00 21 00 00 00 0C 46 DE | 10 10
+MOD  A5 01 00 23 00 00 00 11 8A 19 | 80 10 | 6A 79 69 90 | FB
+                                             ^^^^^^^^^^^ unix timestamp
+```
+
+Every ~10 minutes. Worth knowing for a replacement module: the AC expects
+whatever sits on `CN-16` to be a time source.
+
+### WiFi signal strength
+
+The module's heartbeat ACK carries an `02 64` parameter holding a **signed
+32-bit dBm** value:
+
+```
+A5 01 00 23 00 00 00 12 F6 62 80 0C | 02 64 FF FF FF DB     = -37 dBm
+```
+
+Observed −37 to −43 overnight. **Note the namespace:** this is the `02`
+*parameter* `0x64`, unrelated to the AC's *field* `0x64` (input power).
 
 ## Commands
 
@@ -88,9 +113,11 @@ which is why it first looked like "speed 0".
 
 ```
 frame[10:12]   payload header -- THIS is what distinguishes a command:
-                 `0C 0C` = state report   (AC -> module)
-                 `0A 0A` = COMMAND        (module -> AC)
-                 `0D 0D` = clock
+                 `0C 0C` = state report    (AC -> module)
+                 `0A 0A` = COMMAND         (module -> AC)
+                 `0D 0D` = clock broadcast
+                 `10 10` = clock REQUEST   (AC asks, module answers)
+                 `26 26` = periodic poll
 frame[12]      00
 frame[13:]     records
 ```
@@ -154,7 +181,7 @@ remainder as 2-byte records, skipping 6 bytes whenever a wide id appears.
 | `0x5C` | **Indoor coil temperature** | centi-°C | 10–13 °C while cooling; warms to ambient when off |
 | `0x0E` | Vertical airflow | 1 byte | 8 positions per the app |
 | `0x11` | Horizontal airflow | 1 byte | 9 positions per the app; observed set is exactly `01 02 03 08 09 0A 0B 0C 0D` |
-| `0x60` | **Outdoor AIR temperature** | centi-°C | Read 89.6–91.4 °F while the compressor pulled 850 W — a condensing coil would be 115–130 °F under that load |
+| `0x60` | **Outdoor AIR temperature** | centi-°C | Read 89.6–91.4 °F while the compressor pulled 850 W — a condensing coil would be 115–130 °F under that load. **Only reported while the outdoor unit is energised** — silent for 5 hours of idle |
 | `0x64` | **Input power** | 16-bit, W | 620–930 at partial load, 0 when off. The app has a power-usage tracker, so the unit must report this |
 | `0xC0` | **Compressor target** | 16-bit, % | Commanded speed. Jumps straight to value on start |
 | `0x65` | **Compressor actual** | 16-bit, % | Ramps up to meet `0xC0` |
@@ -290,6 +317,12 @@ centi-°C**:
 
 **A fan goes to zero when it stops. A coil warms to ambient.** The give-away was
 the value *climbing* after shutdown and converging on the room temperature.
+
+**But it does not fully equilibrate.** Over five idle hours it pinned at exactly
+75.2 °F while room temperature drifted 80.4 → 83.3 °F — an **8 °F offset that
+never closes**. So the coil-to-room difference is not a clean measure of cooling
+output at rest; the sensor appears to sit on refrigerant piping rather than in
+the air path.
 
 Generalising: **a plausible-looking number is not evidence.** Check that a field
 behaves correctly at the boundaries — off, minimum, maximum — not just that its
