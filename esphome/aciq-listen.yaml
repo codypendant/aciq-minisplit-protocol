@@ -1,0 +1,479 @@
+# =============================================================================
+# ACiQ MINI SPLIT (K18W) -- LISTEN-ONLY PROTOCOL DECODER
+#
+# Taps the AC's transmit line and decodes its state broadcasts. It NEVER
+# transmits. The stock TCL WBR1 dongle stays plugged in and keeps working
+# exactly as it does today -- this board is a bystander on one wire.
+#
+# Purpose: map the remaining protocol fields (mode, swing, room temp) from a
+# node that runs for days, instead of 25-second logic-analyser captures. Once
+# the field map is complete, control gets added to a parser that is already
+# known to be correct.
+#
+# Written 2026-08-09 from four LA1010 captures. Protocol notes below are
+# MEASURED, not inferred from prior art -- see the warning in
+# `aciq-minisplit.yaml` about why the published TCL components do not apply.
+#
+# ---------------------------------------------------------------------------
+# *** WIRING -- THREE WIRES, AND GPIO17 MUST STAY DISCONNECTED ***
+#
+#   harness WHITE (GND) ------------------------- ESP32 GND
+#   harness RED   (AC transmits)  -- shifter ----- ESP32 GPIO16   (RX only)
+#   harness BLACK (module transmits) -- shifter -- ESP32 GPIO4    (RX only)
+#
+#                                   GPIO17 ------- *** NOTHING ***
+#
+# BOTH taps are receive-only. Leaving the transmit pin unconnected is what
+# makes this safe: there is no bus contention to get wrong, and no malformed
+# frame can reach the mainboard. Do not "temporarily" wire GPIO17 to see what
+# happens.
+#
+# BLACK is tapped because it is the direction an ESP32 replacement will one day
+# have to SPEAK. With the phone app paired, driving the app generates real
+# module->AC commands on that line -- which is the cheapest possible way to
+# learn the command format without transmitting anything ourselves.
+# Listening to a line we will later drive is still listening.
+#
+# RED is the AC's transmit line -- PROVEN in both directions:
+#   module powered alone, no AC -> BLACK active, RED idle
+#   AC powered alone, no module -> RED active, BLACK idle
+#
+# *** CN-16 IS 5 V LOGIC. *** Measured with a meter. ESP32 pins are not 5 V
+# tolerant. Use the 4-channel shifter (HV from harness YELLOW +5V, LV to 3V3).
+# Receive-only would also tolerate a plain 10k/20k divider, but the shifter is
+# already on hand, so use it.
+#
+# *** POWER THIS BOARD FROM USB for the listening phase. *** Do not tap CN-16
+# +5V yet, and NEVER connect USB and CN-16 5 V at the same time -- back-feeding
+# destroys boards and USB ports.
+#
+# Splicing a tap into a line that must ALSO continue to the dongle needs
+# 3-conductor lever nuts: **WAGO 221-413**, not the 2-conductor 221-412.
+#
+# ---------------------------------------------------------------------------
+# MEASURED PROTOCOL -- 115200 8N1, 0xA5 FRAMING
+#
+# NOT TCL's 0xBB @ 9600 8E1. NOT Midea's 0xAA. NOT Tuya's 55 AA. The module is
+# Tuya silicon (WBR1 / RTL8720CF) running TCL Home firmware, and the wire
+# protocol matches nothing published. 9600 is ruled out empirically: 2347 of
+# 2347 pulses match a 115200 bit time, 0 of 2347 match 9600.
+#
+#   [0]     A5          header
+#   [1]     01          constant
+#   [2]     00 / 01     link flag
+#   [3]     TYPE        0x21 = report      0x23 = acknowledgment
+#   [4]     COUNTER     increments per message
+#   [5:6]   00 00
+#   [7]     LENGTH      total frame length, INCLUDING these 8 header bytes
+#   [8:9]   CHECK       16-bit, big-endian -- NOT a standard CRC16, unsolved
+#   [10:]   payload     starts `0C 0C 00`, then <field> <value> 00, then data
+#
+# Reference frames (0 framing errors, all length bytes valid):
+#
+#   AC  A5 01 01 21 99 00 00 18 47 A0 0C 0C 00 02 00 00 0A 8C 02 27 00 00 00 51
+#   MOD A5 01 01 23 00 99 00 0C 24 4E 80 0C          <- ACK, echoes counter 99
+#   AC  A5 01 01 21 9B 00 00 15 F5 7D 0C 0C 00 05 03 00 72 00 00 00 28
+#
+# FIELDS CONFIRMED against six known button presses:
+#   * SETPOINT -- last byte, in DEGREES FAHRENHEIT, on frames whose final six
+#     bytes are `02 27 00 00 00 <sp>`. Observed 81/80/79/80 across
+#     up/down/down/up from a starting setpoint of 80 F.
+#   * FAN SPEED -- payload field id 0x05 (frame index 13), value at index 14.
+#     Stepped 3 -> 4 on two consecutive fan presses.
+#
+# The checksum is deliberately NOT validated here. It resisted solving against
+# 16 clean frames across 7 polynomials and every span/offset combination, and
+# receive-only does not need it: header + length + the ACK counter echo are
+# enough to frame reliably. Do not invent a check that "looks close".
+#
+# ---------------------------------------------------------------------------
+# HOW TO USE IT TO MAP THE REMAINING FIELDS
+#
+# Every complete frame is logged at INFO, so it appears in the ESPHome log
+# without enabling debug. Watch the log, press ONE button, note what changed.
+#
+# `Last Unmapped Frame` holds the most recent frame this config could not
+# interpret -- that is the queue of work. When mode or swing shows up there,
+# the changing byte is the field.
+#
+# METHOD NOTE, learned the hard way on the ceiling fans: field boundaries
+# guessed from ONE capture per button have been wrong repeatedly. Press the
+# SAME button six times, ~5 s apart. Whatever increments is the value;
+# whatever stays constant is the field id.
+# =============================================================================
+
+substitutions:
+  device_name: aciq-listen
+  humanly_name: "Mini Split Listener"
+
+  # RED = the AC's transmit line, through the level shifter.
+  # GPIO16 is the ESP32's native UART2 RX, so this maps to real UART hardware.
+  uart_rx: GPIO16
+
+  # BLACK = the module's transmit line. Receive-only, second hardware UART.
+  # NOT GPIO9/10 (UART1's defaults) -- those are wired to the flash chip.
+  uart_rx_mod: GPIO4
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${humanly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+    # CONFIRMED from this board's own boot log 2026-08-09:
+    # "ESP32 Chip: ESP32 rev3.1, 2 core(s)". ESPHome itself then recommended
+    # both of these. Do NOT copy to another board without re-checking -- a
+    # "3.1" floor will not boot on older silicon.
+    advanced:
+      minimum_chip_revision: "3.1"
+      sram1_as_iram: true
+
+# Left on UART0 deliberately: the first flash is over USB and the boot log is
+# how the chip revision above gets checked. The AC tap uses UART2 (GPIO16).
+logger:
+  level: INFO
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # The head unit is ~4 ft from the garage ceiling AP, so signal is a non-issue.
+  ap:
+    ssid: "${device_name} fallback"
+    password: !secret ap_fallback_password
+
+captive_portal:
+
+# -----------------------------------------------------------------------------
+# THE TAP. rx_pin only -- no tx_pin key exists in this block on purpose.
+# -----------------------------------------------------------------------------
+uart:
+  - id: ac_bus
+    rx_pin: ${uart_rx}
+    baud_rate: 115200
+    data_bits: 8
+    parity: NONE
+    stop_bits: 1
+    # A 90-byte frame is the longest seen. Polling every 10 ms can accumulate
+    # at most ~115 bytes at this rate, so 1024 has generous headroom.
+    rx_buffer_size: 1024
+
+  - id: mod_bus
+    rx_pin: ${uart_rx_mod}
+    baud_rate: 115200
+    data_bits: 8
+    parity: NONE
+    stop_bits: 1
+    rx_buffer_size: 1024
+
+globals:
+  - id: rx_buf
+    type: std::vector<uint8_t>
+    restore_value: no
+  - id: rx_buf_mod
+    type: std::vector<uint8_t>
+    restore_value: no
+  - id: frame_count
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: reject_count
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+sensor:
+  - platform: template
+    name: "Setpoint"
+    id: ac_setpoint
+    unit_of_measurement: "°F"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    name: "Fan Speed"
+    id: ac_fan_speed
+    icon: mdi:fan
+    accuracy_decimals: 0
+    update_interval: never
+
+  # Raw 0-4. Which value is auto/cool/dry/fan/heat is NOT yet established --
+  # the capture proved there are exactly five, not which is which. Map it to
+  # names only after watching the app while each mode is selected.
+  - platform: template
+    name: "Mode (raw)"
+    id: ac_mode_raw
+    icon: mdi:hvac
+    accuracy_decimals: 0
+    update_interval: never
+
+  # Field 0x03, centi-degrees Celsius on the wire, published in F. The AC
+  # reports this unprompted roughly once a minute -- it is what makes a real
+  # climate entity possible rather than a write-only remote.
+  - platform: template
+    name: "Room Temperature"
+    id: ac_room_temp
+    unit_of_measurement: "°F"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+
+  - platform: template
+    name: "Blower RPM"
+    id: ac_blower_rpm
+    unit_of_measurement: "rpm"
+    icon: mdi:fan
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    name: "Fan Percent"
+    id: ac_fan_pct
+    unit_of_measurement: "%"
+    icon: mdi:fan
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    name: "Frames Decoded"
+    id: ac_frames
+    icon: mdi:counter
+    state_class: total_increasing
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    name: "Frames Rejected"
+    id: ac_rejects
+    icon: mdi:alert-outline
+    state_class: total_increasing
+    accuracy_decimals: 0
+    update_interval: never
+
+binary_sensor:
+  # Field 0x01. The AC emits a full 66/90/72-byte state dump immediately after
+  # each power-ON -- useful later, as it is exactly when a freshly booted
+  # ESP32 would otherwise have to ask for state.
+  - platform: template
+    name: "Power"
+    id: ac_power
+    device_class: power
+
+text_sensor:
+  - platform: template
+    name: "Last Frame"
+    id: ac_last_frame
+    icon: mdi:code-array
+    update_interval: never
+
+  # The mapping queue: anything this config could not interpret lands here.
+  - platform: template
+    name: "Last Unmapped Frame"
+    id: ac_last_unmapped
+    icon: mdi:help-box
+    update_interval: never
+
+  # Decoded records whose field id has no meaning assigned yet, as `id=val`
+  # pairs. POWER and ROOM TEMPERATURE are the two that still matter -- watch
+  # this while toggling power, and watch it drift over hours for the sensor.
+  - platform: template
+    name: "Unknown Fields"
+    id: ac_unknown_fields
+    icon: mdi:tag-search
+    update_interval: never
+
+interval:
+  - interval: 10ms
+    then:
+      - lambda: |-
+          static const char *const TAG = "aciq";
+          static std::string prev_frame;
+          static std::string prev_unmapped;
+          static std::string prev_fields;
+
+          // Two receive-only taps. ch 0 = RED (AC), ch 1 = BLACK (module).
+          // Indexed rather than pointer-typed so this stays plain ESPHome API.
+          for (int ch = 0; ch < 2; ch++) {
+          auto &v = (ch == 0) ? id(rx_buf) : id(rx_buf_mod);
+          const char *dir = (ch == 0) ? "AC " : "MOD";
+
+          while (ch == 0 ? id(ac_bus).available() : id(mod_bus).available()) {
+            uint8_t b;
+            bool got = (ch == 0) ? id(ac_bus).read_byte(&b)
+                                 : id(mod_bus).read_byte(&b);
+            if (!got) break;
+
+            // Resynchronise on the header rather than trusting byte alignment.
+            if (v.empty() && b != 0xA5) continue;
+            v.push_back(b);
+
+            // Length arrives at index 7. Reject implausible values immediately
+            // so a corrupt byte costs one frame, not the whole stream.
+            if (v.size() == 8) {
+              uint8_t len = v[7];
+              if (len < 8 || len > 128) {
+                id(reject_count)++;
+                id(ac_rejects).publish_state(id(reject_count));
+                v.clear();
+                continue;
+              }
+            }
+
+            if (v.size() < 8 || v.size() != (size_t) v[7]) continue;
+
+            // ---- complete frame ----
+            std::string hex;
+            char tmp[4];
+            for (uint8_t x : v) { sprintf(tmp, "%02X ", x); hex += tmp; }
+            if (!hex.empty()) hex.pop_back();
+
+            ESP_LOGI(TAG, "%s %s [%2u] %s", dir,
+                     v[3] == 0x21 ? "REPORT" : (v[3] == 0x23 ? "ACK   " : "TYPE? "),
+                     (unsigned) v.size(), hex.c_str());
+
+            id(frame_count)++;
+            id(ac_frames).publish_state(id(frame_count));
+
+            // Republishing an identical string on every broadcast would churn
+            // the recorder for no information, so only publish on change.
+            if (hex != prev_frame) {
+              prev_frame = hex;
+              id(ac_last_frame).publish_state(hex);
+            }
+
+            size_t n = v.size();
+            bool mapped = false;
+
+            // ACKs carry no state -- they only echo the counter.
+            if (v[3] == 0x23) mapped = true;
+
+            // ---- wide fields: <id> 00 00 <hi> <lo> ----
+            // Record widths are SCHEMA-DEPENDENT, not uniform. Most fields are
+            // one byte (`<id> <val> 00`), but some carry a 32-bit value
+            // (`<id> 00 00 <hi> <lo> 00`). The generic 2-byte walk below
+            // mislabels those -- it reported room temperature as a phantom
+            // "0A=D2" field. Scan for the wide form explicitly first.
+            if (v[3] == 0x21 && n >= 18 && v[10] == 0x0C && v[11] == 0x0C) {
+              for (size_t i = 13; i + 4 < n; i++) {
+                if (v[i+1] != 0x00 || v[i+2] != 0x00) continue;
+                uint16_t val = ((uint16_t) v[i+3] << 8) | v[i+4];
+                switch (v[i]) {
+                  case 0x03:   // ROOM TEMPERATURE, centi-degrees Celsius.
+                               // Reported unprompted every ~60 s.
+                    if (val >= 500 && val <= 5000) {
+                      id(ac_room_temp).publish_state(val / 100.0f * 9.0f / 5.0f + 32.0f);
+                      mapped = true;
+                    }
+                    break;
+                  case 0x5C:   // Indoor blower RPM.
+                    if (val >= 100 && val <= 4000) {
+                      id(ac_blower_rpm).publish_state(val);
+                      mapped = true;
+                    }
+                    break;
+                  case 0x02:   // Setpoint in centi-C. The user-facing value
+                               // comes from the trailing degF byte below, which
+                               // is what the remote and app actually display.
+                    mapped = true;
+                    break;
+                }
+              }
+            }
+
+            // ---- payload records ----
+            // Layout: header at [10:12], then from [13] a list of
+            //   <id> <value>  00  <id> <value>  00  ...  <id> <value>
+            // The LAST record has NO trailing separator, so a fixed 3-byte
+            // stride drops it -- and that is exactly where the short frames
+            // put their data. Walk it as 2-byte records with a 1-byte gap.
+            //
+            // Only `0C 0C` payloads follow this layout. `0D 0D` is a different
+            // payload type; parsing it this way yields garbage, so skip it.
+            if (v[3] == 0x21 && n >= 15 && v[10] == 0x0C && v[11] == 0x0C) {
+              std::string unknown;
+              size_t i = 13;
+              while (i + 1 < n) {
+                uint8_t fid = v[i], val = v[i + 1];
+                // Wide fields carry a 32-bit value and are handled by the scan
+                // above. Step over the whole record, otherwise the 2-byte walk
+                // chews their tail and invents phantom fields (RPM 0x04B0 was
+                // showing up as a bogus "04=B0").
+                if ((fid == 0x02 || fid == 0x03 || fid == 0x5C ||
+                     fid == 0x64 || fid == 0xC0) &&
+                    i + 4 < n && v[i+1] == 0x00 && v[i+2] == 0x00) {
+                  i += 6;
+                  continue;
+                }
+                i += 3;
+                switch (fid) {
+                  case 0x01:   // POWER -- confirmed: toggled 00/01/00/01
+                               // exactly in step with four power presses.
+                    id(ac_power).publish_state(val != 0);
+                    mapped = true;
+                    break;
+                  case 0x12:   // MODE -- 5 states, confirmed against the app
+                    if (val <= 4) { id(ac_mode_raw).publish_state(val); mapped = true; }
+                    break;
+                  case 0x05:   // FAN -- 7 speeds + auto, so do not clamp tight
+                    if (val <= 15) { id(ac_fan_speed).publish_state(val); mapped = true; }
+                    break;
+                  case 0x72:   // fan percent: 1/25/40/55/70/85/100, tracks 0x05
+                    if (val <= 100) { id(ac_fan_pct).publish_state(val); mapped = true; }
+                    break;
+                  case 0x0E:   // up/down flow  -- decoded, not wanted
+                  case 0x11:   // left/right flow
+                  case 0x0C:   // per-axis enable companions
+                  case 0x0D:
+                  case 0x0A:   // phantom -- the low half of a wide field that
+                               // the 2-byte walk splits. Handled above.
+                    mapped = true;
+                    break;
+                  default: {
+                    // Everything else is the mapping queue. POWER and ROOM
+                    // TEMPERATURE are still unidentified and will surface here.
+                    char t[16];
+                    sprintf(t, "%02X=%02X ", fid, val);
+                    unknown += t;
+                    break;
+                  }
+                }
+              }
+              if (!unknown.empty() && unknown != prev_fields) {
+                prev_fields = unknown;
+                id(ac_unknown_fields).publish_state(unknown);
+              }
+            }
+
+            // SETPOINT: frames ending `02 27 00 00 00 <degF>`. Kept as a
+            // trailing-signature match because the setpoint sits outside the
+            // record list, after it.
+            if (v[3] == 0x21 && n >= 16 && v[n-6] == 0x02 && v[n-5] == 0x27 &&
+                v[n-4] == 0x00 && v[n-3] == 0x00 && v[n-2] == 0x00) {
+              uint8_t sp = v[n-1];
+              // Sanity band: a real Fahrenheit setpoint, not a stray byte.
+              if (sp >= 60 && sp <= 90) {
+                id(ac_setpoint).publish_state(sp);
+                mapped = true;
+              }
+            }
+
+            if (!mapped && hex != prev_unmapped) {
+              prev_unmapped = hex;
+              id(ac_last_unmapped).publish_state(hex);
+              ESP_LOGI(TAG, "  ^ UNMAPPED -- this is the one to decode");
+            }
+
+            v.clear();
+          }
+          }
