@@ -109,7 +109,7 @@ remainder as 2-byte records, skipping 6 bytes whenever a wide id appears.
 | `0x0E` | Vertical airflow | 1 byte | 8 positions per the app |
 | `0x11` | Horizontal airflow | 1 byte | 9 positions per the app; observed set is exactly `01 02 03 08 09 0A 0B 0C 0D` |
 | `0x60` | **Outdoor temperature** | centi-°C | Cross-checked against an independent outdoor sensor |
-| `0xC0` | **Compressor** | 16-bit | 30–82 running, **exactly 0** when off. Units assumed Hz |
+| `0xC0` | **Compressor frequency** | 16-bit, Hz | 30–82 running, **exactly 0** when off |
 | `0x41`, `0x42` | Unix timestamps | 32-bit | In `0D 0D` clock frames |
 
 ### The unit thinks in Celsius
@@ -135,7 +135,7 @@ not conclusions.**
 | Id | Values seen | Hypothesis |
 |---|---|---|
 | `0x65` | 0–66, **0 when off** | Second compressor metric — target vs actual frequency? current? |
-| `0x64` | 930, 890, 850, 620 | Power (W)? outdoor fan RPM? |
+| `0x64` | 930, 890, 850, 620 | **Input power (W)** — a strong fit for an 18k BTU inverter at partial load, and it falls with compressor frequency rather than sitting at a fixed draw |
 | `0x06` | `40`, `A4` | — |
 | `0x13`, `0x15`, `0xDF` | 0/1 toggles | Feature flags |
 | `0x38`, `0x3D`, `0x74`, `0x95`, `0xA4`, `0xBD`–`0xBF` | mostly constant | — |
@@ -156,8 +156,16 @@ is overnight behaviour — **air falls steadily through the night, a coil jumps
 with compressor cycles.** Worth an overnight log before trusting the label.
 
 `0xC0` is *not* a temperature: it runs 30–82 and reads exactly 0 whenever the
-unit is off, so it tracks compressor state. `0x65` behaves the same way and is
+unit is off. **This unit is a multi-speed DC inverter**, and that is what makes
+the reading solid — a fixed-speed compressor would report one value or zero,
+whereas the observed 30 / 38 / 40 / 42 / 48 / 66 / 82 is continuous modulation
+across a textbook inverter frequency range. `0x65` behaves the same way and is
 still unidentified.
+
+**Knowing the unit is an inverter narrows the remaining unknowns**, because a
+variable-speed machine has to report things a fixed-speed one does not: operating
+frequency, input power, and a target-versus-actual pair. Interpret candidate
+fields with that in mind rather than assuming simple on/off telemetry.
 
 ## Behaviour worth exploiting
 
