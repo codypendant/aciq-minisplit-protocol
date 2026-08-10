@@ -85,7 +85,7 @@ Live Home Assistant sensors, decoded from the appliance's own reporting:
 | Fan Percent | field `0x72` | 1 / 25 / 40 / 55 / 70 / 85 / 100 |
 | Blower RPM | field `0x5C` | 1000–2300 observed |
 | Outdoor Temperature | field `0x60` | Cross-checked against an independent outdoor sensor |
-| Compressor | field `0xC0` | Operating frequency in Hz; 0 when off |
+| Compressor Speed | field `0xC0` | 0 when off. Percent vs Hz not yet settled |
 | Frames Decoded / Rejected | — | Health check. Rejected should stay at zero |
 | Last Frame / Unknown Fields | — | The mapping queue for anything not yet identified |
 
@@ -242,9 +242,10 @@ tools/README.md              analyser settings that work
 ## Hardware this was built on
 
 - **ACiQ `ACIQ-K18W-W-32-HP2300`** — 18k BTU single-zone wall-mount heat pump,
-  **multi-speed DC inverter**. That matters when reading the telemetry: the
-  compressor modulates continuously rather than cycling on and off, which is why
-  `0xC0` sweeps 30–82 Hz instead of reporting a single running value
+  **multi-speed DC inverter** — the compressor and air handler each take a
+  0–100% speed. That matters when reading the telemetry: the compressor
+  modulates continuously rather than cycling on and off, which is why `0xC0`
+  sweeps 30–82 instead of reporting a single running value
 - WiFi module: **TCL `WBR1`**, silkscreen `TCLWBR V1.0.0`, RTL8720CF
 - Analyser: **Kingst LA1010** (−50 V to +50 V inputs, so it clips straight onto
   5 V logic)

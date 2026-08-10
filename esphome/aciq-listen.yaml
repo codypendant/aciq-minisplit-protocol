@@ -237,11 +237,12 @@ sensor:
     accuracy_decimals: 1
     update_interval: never
 
-  # Field 0xC0. Reads 0 whenever the unit is off.
+  # Field 0xC0. Reads 0 whenever the unit is off. Units unconfirmed -- see the
+  # note in the lambda; percent is the better-supported reading, not Hz.
   - platform: template
-    name: "Compressor"
+    name: "Compressor Speed"
     id: ac_compressor
-    unit_of_measurement: "Hz"
+    unit_of_measurement: "%"
     icon: mdi:air-conditioner
     state_class: measurement
     accuracy_decimals: 0
@@ -420,9 +421,18 @@ interval:
                       mapped = true;
                     }
                     break;
-                  case 0xC0:   // Compressor. Ran 30-82 while cooling and went
-                               // to EXACTLY 0 the moment power was switched
-                               // off. Units assumed Hz.
+                  case 0xC0:   // Compressor speed. Ran 30-82 while cooling and
+                               // went to EXACTLY 0 the moment power was
+                               // switched off.
+                               // UNITS NOT SETTLED. This unit is a DC inverter
+                               // whose compressor and air handler both accept a
+                               // 0-100% speed, and every observed value is <=
+                               // 100 -- so percent fits. 30-82 Hz would also be
+                               // a textbook inverter range. 0x65 behaves
+                               // identically and is likely the target/actual
+                               // counterpart. Distinguish by commanding a known
+                               // percentage in the app and seeing which field
+                               // lands on it exactly.
                     if (val <= 200) {
                       id(ac_compressor).publish_state(val);
                       mapped = true;
