@@ -462,9 +462,23 @@ interval:
               mapped = true;
             }
 
+            // Clock frames. Understood, nothing to publish -- but they must
+            // not sit in the mapping queue pretending to be undecoded work.
+            if (v[3] == 0x21 && n >= 12 && v[10] == 0x0D && v[11] == 0x0D)
+              mapped = true;
+
+            // Bare heartbeat: a 0C 0C payload carrying no records at all.
+            if (v[3] == 0x21 && n <= 13 && v[10] == 0x0C && v[11] == 0x0C)
+              mapped = true;
+
             std::string wide;
             if (v[3] == 0x21 && n >= 18 && v[10] == 0x0C && v[11] == 0x0C) {
-              for (size_t i = 13; i + 4 < n; i++) {
+              // Step by 3, not 1. Every record is a multiple of three bytes
+              // (narrow = id/val/sep, wide = id/00/00/hi/lo/sep), so a stride
+              // of 3 stays on real boundaries. Scanning every offset matched
+              // `xx 00 00` mid-record and invented fields that do not exist --
+              // that is where "0C=3328(91.9F)" and "DF=51456" came from.
+              for (size_t i = 13; i + 4 < n; i += 3) {
                 if (v[i+1] != 0x00 || v[i+2] != 0x00) continue;
                 uint16_t val = ((uint16_t) v[i+3] << 8) | v[i+4];
                 // Anything wide we have not claimed gets surfaced with a
@@ -474,13 +488,19 @@ interval:
                   case 0x60: case 0x64: case 0x65: case 0x72: case 0xC0:
                     break;                      // already understood
                   default: {
-                    char t[48];
-                    if (val >= 200 && val <= 6000)
+                    // Only surface values in a plausible thermistor band.
+                    // A narrow record holding zero is byte-identical to the
+                    // start of a wide field (`0C 00 00 0D 00 00` is really
+                    // 0C=0 then 0D=0, but reads as 0C=3328), so this scan
+                    // cannot be made exact -- it can only be made USEFUL.
+                    // The one remaining target is the blower-outlet sensor,
+                    // so anything outside 0-50 C is noise here.
+                    if (val >= 200 && val <= 5000) {
+                      char t[48];
                       sprintf(t, "%02X=%u(%.1fF) ", v[i], val,
                               val / 100.0f * 9.0f / 5.0f + 32.0f);
-                    else
-                      sprintf(t, "%02X=%u ", v[i], val);
-                    wide += t;
+                      wide += t;
+                    }
                     break;
                   }
                 }

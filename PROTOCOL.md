@@ -108,6 +108,15 @@ Room temperature first appeared as a bogus `0A=D2` for precisely this reason.
 Known wide fields: `0x02`, `0x03`, `0x5C`, `0x60`, `0x64`, `0x65`, `0x72`,
 `0xC0`.
 
+**The encoding is genuinely ambiguous without a schema.** A narrow record whose
+value is zero is byte-identical to the start of a wide field: `0C 00 00 0D 00 00`
+is really `0C=0` followed by `0D=0`, but reads as `0C=3328`. Only a known-wide
+list resolves it — a parser cannot infer widths from the bytes alone.
+
+Records are always a **multiple of three bytes** (narrow = id/val/separator,
+wide = id/00/00/hi/lo/separator), so any scan must step by 3. Stepping by 1
+matches `xx 00 00` mid-record and invents fields that do not exist.
+
 **Symptom worth memorising:** a value that publishes as a constant **0** is
 usually a wide field being parsed as narrow. Fan percent (`0x72`) did exactly
 this until the live log showed `72 00 00 00 19` — the 25 was three bytes further
