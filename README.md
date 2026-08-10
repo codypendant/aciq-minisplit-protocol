@@ -248,7 +248,19 @@ tools/README.md              analyser settings that work
 
 ACiQ is a house brand; the mini split and the ducted units are **not** the same
 platform. The ducted air handler in the companion project uses an RS-485 XYE
-bus and shares nothing with this.
+bus and shares nothing with this — different OEM, different bus, different
+protocol, same badge on the front.
+
+## Companion project
+
+**[aciq-local-control](https://github.com/codypendant/aciq-local-control)** —
+the ducted ACiQ / Midea air handler, brought under local control over its RS-485
+**XYE** service bus, with a pixel-matched Lovelace replica of the TL04-1 wall
+thermostat.
+
+Same house brand, entirely different hardware underneath. Worth reading if you
+have ACiQ equipment and are not sure which of the two you own: if it is a ducted
+unit with a wall thermostat, that is the one you want.
 
 ## Licence
 
