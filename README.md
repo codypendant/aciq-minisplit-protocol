@@ -82,7 +82,7 @@ Live Home Assistant sensors, decoded from the appliance's own reporting:
 | Room Temperature | field `0x03` | Emitted **unprompted every ~60 s** — this is what makes a real climate entity possible |
 | Setpoint | trailing byte | °F as the remote displays it |
 | Power | field `0x01` | |
-| Mode | field `0x12` | Raw 0–4; see [the caveat](#the-mode-names-are-deliberately-not-mapped) |
+| Mode | field `0x12` | Named + raw; see [mode values](#mode-values--mapped-and-verified) |
 | Fan Speed | field `0x05` | 1–7, and **0 = auto** |
 | Fan Percent | field `0x72` | 1 / 25 / 40 / 55 / 70 / 85 / 100 |
 | Indoor Coil Temperature | field `0x5C` | Evaporator; 10–13 °C while cooling |
@@ -168,19 +168,29 @@ Notes that cost time:
 If frames never arrive, check the shifter rails first. It is almost always the
 shifter rails.
 
-## The mode names are deliberately not mapped
+## Mode values — mapped and verified
 
-Field `0x12` has exactly five values, `00`–`04`, confirmed by cycling the app
-through auto / cool / dry / fan / heat. **Which number is which mode was never
-verified**, so the entity exposes the raw integer.
+| raw | mode |
+|---|---|
+| `0` | auto |
+| `1` | cool |
+| `2` | dry |
+| `3` | fan |
+| `4` | heat |
 
-Guessing would produce an entity that looks correct and heats when asked to
-cool. Watch your own unit, then map it. It takes a minute and it is your
-hardware, not mine.
+Established by pressing each mode in the app and reading the resulting **command
+frame**, not by watching what the unit did. Cool is double-confirmed: it was the
+power-on state and the value the closing press returned.
 
-The same applies to `0x0E` / `0x11`, the two multi-position airflow controls
-(8 and 9 positions). They were decoded far enough to prove the record encoding
-and then deliberately left alone.
+The entity exposes both a named **Mode** and the raw integer. The raw one stays
+because the mapping is verified but the number cannot be wrong.
+
+**Caveat worth carrying into a write path:** selecting dry also forces a fan
+speed (`12=02` arrives with `05=02`). Setting mode alone may change more than
+mode.
+
+The airflow controls `0x0E` / `0x11` (8 and 9 positions) remain deliberately
+unmapped — decoded far enough to prove the record encoding, then left alone.
 
 ## Where this stops
 
@@ -194,15 +204,11 @@ What remains is deliberate:
   appliance whose harness has to be cut to tap, and the failure mode for a bad
   frame involves a ladder and a teardown. Everything needed to transmit is in
   [`PROTOCOL.md`](PROTOCOL.md); connecting it is a decision, not a discovery.
-- **Mode values are exposed raw.** `0x12` is 0–4 and which is which was never
-  confirmed. Guessing produces an entity that heats when asked to cool.
 - **`0x3D`** cycles 0/1/2 in clock frames with no observed trigger. Unidentified
   and low-value.
 - **A blower-outlet thermistor** may exist but has never appeared on the bus.
 
 ## Roadmap
-
-**Map the mode values** to auto / cool / dry / fan / heat by observation.
 
 **Transmit, then a real climate entity.** Wire black to the ESP32's TX through
 the shifter and drive the bus. Command values must be sent in **centi-°C**, not

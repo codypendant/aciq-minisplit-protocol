@@ -398,6 +398,14 @@ text_sensor:
     icon: mdi:thermometer-lines
     update_interval: never
 
+  # Field 0x12 rendered as a name. The raw integer is kept alongside it
+  # deliberately: the mapping is verified, but the raw value cannot be wrong.
+  - platform: template
+    name: "Mode"
+    id: ac_mode_name
+    icon: mdi:hvac
+    update_interval: never
+
   # Commands seen on the module's transmit line (0A 0A payloads) -- what the
   # app or remote ASKED for, as opposed to what the AC reports.
   - platform: template
@@ -524,10 +532,32 @@ interval:
             // Commands are requests, so nothing here publishes state -- the
             // AC's own report a moment later is the authority.
             if (v[3] == 0x21 && n >= 15 && v[10] == 0x0A && v[11] == 0x0A) {
+              // Commands carry the SAME variable-width records as reports, so
+              // this must skip wide fields exactly as the report walk does.
+              // A flat 3-byte stride once rendered the setpoint record
+              // `02 00 00 0A 8C` as "02=00 0A=8C" -- a real field with the
+              // wrong value, plus a phantom field that does not exist.
               std::string cmd;
-              for (size_t i = 13; i + 1 < n; i += 3) {
-                char t[24];
-                sprintf(t, "%02X=%02X ", v[i], v[i+1]);
+              size_t i = 13;
+              while (i + 1 < n) {
+                uint8_t fid = v[i];
+                bool wide = false;
+                switch (fid) {
+                  case 0x02: case 0x03: case 0x5C: case 0x60:
+                  case 0x64: case 0x65: case 0x72: case 0xC0:
+                    wide = (i + 4 < n && v[i+1] == 0x00 && v[i+2] == 0x00);
+                    break;
+                  default: break;
+                }
+                char t[32];
+                if (wide) {
+                  sprintf(t, "%02X=%u ", fid,
+                          (unsigned) (((uint16_t) v[i+3] << 8) | v[i+4]));
+                  i += 6;
+                } else {
+                  sprintf(t, "%02X=%02X ", fid, v[i+1]);
+                  i += 3;
+                }
                 cmd += t;
               }
               if (!cmd.empty() && cmd != prev_cmd) {
@@ -726,8 +756,21 @@ interval:
                     id(ac_power).publish_state(val != 0);
                     mapped = true;
                     break;
-                  case 0x12:   // MODE -- 5 states, confirmed against the app
-                    if (val <= 4) { id(ac_mode_raw).publish_state(val); mapped = true; }
+                  case 0x12:   // MODE -- mapped 2026-08-10 by pressing each
+                               // mode in the app and reading the COMMAND frame
+                               // it generated, so no behaviour was inferred:
+                               //   0 auto   1 cool   2 dry   3 fan   4 heat
+                               // Cool is double-confirmed: it was the power-on
+                               // state AND the value the fifth press returned.
+                               // NOTE dry arrives as `05=02 12=02` -- selecting
+                               // dry also forces a fan speed.
+                    if (val <= 4) {
+                      static const char *const NAMES[5] =
+                          {"auto", "cool", "dry", "fan", "heat"};
+                      id(ac_mode_raw).publish_state(val);
+                      id(ac_mode_name).publish_state(NAMES[val]);
+                      mapped = true;
+                    }
                     break;
                   case 0x05:   // FAN -- 7 speeds + auto, so do not clamp tight
                     if (val <= 15) { id(ac_fan_speed).publish_state(val); mapped = true; }

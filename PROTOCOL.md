@@ -94,8 +94,39 @@ A5 01 01 21 2F 00 00 0F C7 DD 0A 0A 00 13 01             eco mode ON
 A5 01 01 21 36 00 00 12 B7 F8 0A 0A 00 13 00 00 01 01    eco OFF *and* power ON
 ```
 
-**A command may carry more than one record.** The last example sets two fields
-in a single frame. Do not assume one command equals one change.
+**A command may carry more than one record.** Do not assume one command equals
+one change — and note the records are the same **variable-width** encoding as a
+report, so a command parser must skip wide fields too. A flat 3-byte stride
+renders the setpoint record `02 00 00 0A 8C` as `02=00` plus a phantom `0A=8C`:
+a real field with the wrong value, and a field that does not exist.
+
+### Mode values — verified, not inferred
+
+Mapped by pressing each mode in the app and reading the command frame it
+produced, so nothing rests on observed behaviour:
+
+| raw | mode | command observed |
+|---|---|---|
+| `0` | auto | `12=00` |
+| `1` | **cool** | `12=01` — power-on state **and** the return press |
+| `2` | dry | `05=02 12=02` |
+| `3` | fan | `12=03` |
+| `4` | heat | `12=04` |
+
+Cool is double-confirmed: it was the unit's power-on state and the value the
+final press returned, which is the check that the sequence never drifted.
+
+**Selecting dry also forces a fan speed** — `12=02` arrives together with
+`05=02`, and returning to cool restored `73=01 05=00` (fan auto). A write path
+that sets mode alone may therefore leave fan settings it did not intend.
+
+Switching back to cool sent a **full state restore** in one frame — setpoint,
+eco, display setpoint, mode, fan auto and fan speed together:
+
+```
+0A 0A 00 02 00 00 0A 8C 00 13 00 02 27 00 00 00 51 00 12 01 00 73 01 00 05 00
+     02=2700  13=00  27=00  00=51  12=01  73=01  05=00
+```
 
 Eco mode is a good worked example of reading a command end to end:
 
@@ -179,7 +210,7 @@ remainder as 2-byte records, skipping 6 bytes whenever a wide id appears.
 | `0x02` | **Setpoint** | centi-°C | Moves in **0.50 °C** steps |
 | `0x03` | **Room temperature** | centi-°C | **Emitted unprompted every ~60 s** |
 | `0x05` | **Fan speed** | 1 byte | `1`–`7`, **`0` = auto** |
-| `0x12` | **Mode** | 1 byte | `00`–`04`. Which is which: unverified |
+| `0x12` | **Mode** | 1 byte | `0` auto · `1` cool · `2` dry · `3` fan · `4` heat — **verified** |
 | `0x13` | **Eco mode** | 1 byte | `0`/`1`. `0xDF` moves in lockstep with it |
 | `0x72` | Fan percent | 1 byte | 1 / 25 / 40 / 55 / 70 / 85 / 100, tracks `0x05` |
 | `0x5C` | **Indoor coil temperature** | centi-°C | 10–13 °C while cooling; warms to ambient when off |
