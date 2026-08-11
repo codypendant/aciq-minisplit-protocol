@@ -421,8 +421,32 @@ like real work. Worse, the record stream only stays aligned here by luck:
 desynchronises the entire rest of the frame.** Any decoder for this protocol
 needs to handle `0x39` explicitly.
 
-The contents are identical in every full-state dump, so it is a static table.
-Cross-referencing it against everything observed:
+#### The list is DYNAMIC, not a static table
+
+An earlier version of this document said the contents were identical in every
+dump and therefore a fixed capability table. **That was wrong**, and it was
+wrong for the usual reason: every dump used to compare had been captured with
+the unit *running*.
+
+`0x0B` drops out of the list while the unit is off, and returns when it comes
+back on. Observed twice, and the correlation is tight:
+
+| Time | Entries | `0x0B` | Power |
+|---|---|---|---|
+| 13:59:19 | 18 | present | on |
+| 21:35:18 | **17** | **absent** | **off** (21:35:20) |
+| 21:36:41 | 18 | present | on (21:36:33) |
+
+So the length byte is not decorative — **the list really does change length at
+runtime**, which makes handling `0x39` as a length-prefixed record mandatory
+rather than merely tidy. A decoder that hardcodes 18 bytes will desynchronise
+the moment the unit is switched off.
+
+Best current reading: this enumerates the functions **currently available**,
+not the ones the unit supports in principle. Still a lead, not a conclusion —
+but "static table" is definitively ruled out.
+
+Cross-referencing the full (powered-on) list against everything observed:
 
 | in the list | status |
 |---|---|
@@ -432,11 +456,13 @@ Cross-referencing it against everything observed:
 | `07` `08` `09` `0B` `1C` `1F` `23` `28` `2A` `31` | **never observed in any frame** |
 
 Ten of eighteen entries have never appeared on the bus at all. That is the
-interesting part: if this is a supported-capability table, those ten are
-functions the unit implements that simply have not been exercised yet.
+interesting part: if this is a capability list, those ten are functions the unit
+implements that simply have not been exercised yet.
 
 **It is not established what the list enumerates** — it spans both the field and
-the `02` parameter namespaces, so it is a lead rather than a conclusion.
+the `02` parameter namespaces, so it is a lead rather than a conclusion. What
+*is* established is that it varies with runtime state, so it is not a static
+description of the hardware.
 
 ### Not yet identified
 

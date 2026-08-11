@@ -934,9 +934,21 @@ interval:
                 // A list of any other length would have desynchronised the
                 // rest of the frame.
                 //
-                // Contents are constant across every full-state dump, so this
-                // is a static table -- most likely the parameters this unit
-                // supports rather than anything live.
+                // *** THE LIST IS DYNAMIC. *** An earlier version of this
+                // comment called it a static table, because every dump used
+                // for comparison had been captured with the unit RUNNING.
+                //
+                // 0x0B drops out while the unit is off and returns when it
+                // comes back on -- observed 2026-08-10:
+                //   13:59:19  18 entries, 0B present, power on
+                //   21:35:18  17 entries, 0B ABSENT,  power off (21:35:20)
+                //   21:36:41  18 entries, 0B present, power on  (21:36:33)
+                //
+                // So the length byte genuinely varies at runtime, which is why
+                // this must be parsed as length-prefixed rather than as a
+                // hardcoded 18 bytes. Best reading: the functions CURRENTLY
+                // available, not the ones the unit supports in principle --
+                // still a lead, but "static" is ruled out.
                 if (fid == 0x39 && i + 1 < n) {
                   uint8_t len = v[i + 1];
                   if (len > 0 && i + 2 + (size_t) len <= n) {
