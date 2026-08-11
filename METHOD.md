@@ -191,6 +191,50 @@ consistent with at least four different faults; "no bytes on either channel"
 narrows it immediately, and it proves the decoder is not at fault. Those
 counters cost nothing and should have existed from the start.
 
+### 6. Reading *button presses* off the bus. You cannot.
+
+**The IR remote batches rapid presses into a single transmission.** It updates
+its own LCD locally and sends only the settled value. Press the up arrow eight
+times quickly and the bus shows **one** setpoint change to the final value —
+byte-for-byte indistinguishable from a one-shot command.
+
+This produced a confident and wrong inference. Observing a setpoint jump
+`72 → 80` with no intermediate values, we concluded "stepwise means manual
+presses, a single jump means a command." That heuristic is worthless here: it
+was eight fast presses.
+
+It also explains a mystery that looked like a contradiction. A preset-recall
+button was pressed, the setpoint was immediately dialled back by hand, and the
+bus recorded **nothing at all** — not the preset value, not the return trip. The
+remote never transmitted the intermediate state, and the final value equalled
+the previous one, so there was no state change to report.
+
+> **The bus reports SETTLED STATE, not keystrokes.** A change that is reverted
+> before the remote transmits is invisible, and no amount of log-reading will
+> recover it.
+
+Two consequences for anyone mapping a remote this way:
+
+- **Attribution comes from the operator's report of which button was pressed,
+  never from the shape of the bus traffic.** Treating the traffic pattern as
+  independent corroboration is circular.
+- **One button, in isolation, with quiet either side, and leave the result
+  alone.** Do not tidy the setting back afterwards until it has been observed at
+  rest — reverting it quickly erases the evidence.
+
+### 7. A beep does not mean the function is supported
+
+Midea-family IR frames carry the **entire** state — mode, setpoint, fan, and all
+the feature flags — in every transmission, not just the button you pressed. The
+indoor unit therefore beeps on receiving any valid frame, whether or not it
+implements the feature whose flag changed.
+
+So "it beeps when I press it" confirms the frame arrived and parsed. It says
+nothing about whether the unit does anything with it. Generic multi-model
+remotes make this worse: the manual for this one covers several variants, and
+notes plainly that *"if the indoor unit does not have a particular function,
+pressing that function's button will have no effect."*
+
 ## What actually worked
 
 ### Cross-checking field widths against the app's own UI
