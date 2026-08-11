@@ -150,6 +150,47 @@ hides two bugs at once. The last record of every frame is 2 bytes (no trailing
 separator), and some fields are 32-bit. Both were invisible until short frames
 turned up carrying nothing but their final record.
 
+### 5. Logging every frame at INFO — it silently wedges the UART
+
+The listener node kept **going deaf**: it stayed online over WiFi, pinged with
+0% loss, kept its globals (so it had not crashed or rebooted), reported **zero
+rejected frames and zero CRC failures** — and received nothing at all, on
+**both** taps at once. Time-to-deaf was 5, 14, 20, 38 minutes.
+
+Two hardware diagnoses were proposed and both were wrong: first the level
+shifter, then a UART peripheral latch-up. Neither survived contact with the
+evidence.
+
+**The cause was one log call.** The 10 ms lambda that drains both UARTs was also
+doing `ESP_LOGI` per frame with a hex string up to ~270 characters. At INFO that
+goes to UART0 *and* to every connected API log client, from inside the hot path.
+The loop fell behind, both RX buffers overran, and the ESP32 driver stopped
+delivering. Both channels are serviced by the same loop, so they died together —
+which is precisely what made it look like shared hardware.
+
+Changing that single call to `ESP_LOGD`:
+
+| | before | after |
+|---|---|---|
+| time to deaf | 5, 14, 20, 38 min | **9.4 h, zero events** |
+| frames | — | 4,221 |
+| rejects / CRC failures | — | **0 / 0** |
+
+**`rx_buffer_size` was already 1024 — the buffer was never the problem.** 1024
+bytes is ~89 ms of headroom at 115200 baud, which is ample right up until the
+loop blocks for longer than that. Enlarging it does nothing.
+
+> **For any ESPHome UART sniffer: do not log per-frame at INFO inside the read
+> loop.** Log at DEBUG and publish the frame to a `text_sensor` instead, then
+> raise `logger: level: DEBUG` only while actively mapping — and expect the
+> stalls to come back while it is raised.
+
+**What finally settled it was instrumentation, not reasoning:** a raw byte
+counter per channel, incremented *before* any framing logic. "No frames" is
+consistent with at least four different faults; "no bytes on either channel"
+narrows it immediately, and it proves the decoder is not at fault. Those
+counters cost nothing and should have existed from the start.
+
 ## What actually worked
 
 ### Cross-checking field widths against the app's own UI

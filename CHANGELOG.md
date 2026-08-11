@@ -1,5 +1,48 @@
 # Changelog
 
+## 2026-08-11 — the listener kept going deaf, and it was a log call
+
+**If you are building an ESPHome UART sniffer from this repo, read this one.**
+
+The node repeatedly stopped receiving — online over WiFi, globals intact so it
+had not crashed, zero rejected frames and zero CRC failures, and no bytes at all
+on **both** taps simultaneously. Time-to-deaf was 5, 14, 20, 38 minutes.
+
+**Cause: `ESP_LOGI` per frame, inside the 10 ms lambda that drains both UARTs.**
+A ~270-character hex string written to UART0 *and* pushed to every connected API
+log client, in the hot path. The loop fell behind, both RX buffers overran, the
+ESP32 driver stopped delivering. Both channels share that loop, so they died
+together — which is exactly why it looked like a shared-hardware fault, and why
+two hardware theories (level shifter, then UART latch-up) were proposed and both
+were wrong.
+
+Changing that one call to `ESP_LOGD`:
+
+| | before | after |
+|---|---|---|
+| time to deaf | 5, 14, 20, 38 min | **9.4 h, zero events** |
+| frames | — | 4,221 |
+| rejects / CRC failures | — | **0 / 0** |
+
+**`rx_buffer_size` was already 1024 and is not the fix.** That is ~89 ms of
+headroom at 115200 — ample until the loop blocks for longer. Do not enlarge it.
+
+**Added**
+- Per-channel **raw byte counters**, incremented before any framing. "No frames"
+  fits at least four different faults; "no bytes on either channel" narrows it
+  at a glance and exonerates the decoder. This is what finally settled it
+- A **watchdog** that restarts the node after 120 s of byte-silence, capped at
+  3 consecutive attempts. Threshold is evidenced, not guessed: across 9.4 h the
+  longest legitimate gap between raw bytes was 60 s, the module heartbeat
+- A separate warning path for "bytes arriving but nothing framing" — a CRC or
+  alignment fault, which a reboot would *not* fix, so it warns instead
+- A **restart button**
+
+**Incidentally validated**: the CRC-16/XMODEM solution was published on the
+strength of 105 frames. It has now run 4,221 frames across a continuous 9.4 h
+with **zero failures**, and every frame decoded — `Last Unmapped Frame` stayed
+empty all night.
+
 ## 2026-08-10 — louvers, generator mode, and two parser corrections
 
 **Corrected — read this if you built anything on the previous field map**

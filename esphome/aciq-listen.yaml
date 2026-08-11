@@ -106,8 +106,17 @@
 # ---------------------------------------------------------------------------
 # HOW TO USE IT TO MAP THE REMAINING FIELDS
 #
-# Every complete frame is logged at INFO, so it appears in the ESPHome log
-# without enabling debug. Watch the log, press ONE button, note what changed.
+# Frames are logged at DEBUG, NOT INFO. That is deliberate and it is the fix
+# for the RX stalls -- logging every frame at INFO from inside the read loop
+# wedged both UARTs within 5-38 min. See the ESP_LOGD comment in the read loop.
+#
+# So for day-to-day running, read the frames from the `Last Frame` and
+# `Last Unmapped Frame` entities in Home Assistant, not from the log.
+#
+# WHEN ACTIVELY MAPPING FIELDS, set `logger: level: DEBUG` to get the per-frame
+# stream back -- then press ONE button and note what changed. Expect the stalls
+# to return while DEBUG is on, and put it back to INFO afterwards. The watchdog
+# will keep recovering the node in the meantime.
 #
 # `Last Unmapped Frame` holds the most recent frame this config could not
 # interpret -- that is the queue of work. When mode or swing shows up there,
@@ -179,6 +188,12 @@ uart:
     stop_bits: 1
     # A 90-byte frame is the longest seen. Polling every 10 ms can accumulate
     # at most ~115 bytes at this rate, so 1024 has generous headroom.
+    #
+    # NOTE FOR ANYONE DEBUGGING RX STALLS HERE: this size is not the problem
+    # and enlarging it will not help. The 2026-08-10 stalls came from the read
+    # loop falling behind because it logged every frame at INFO -- 1024 bytes
+    # is ~89 ms of headroom at 115200, which is plenty right up until the loop
+    # blocks for longer than that. See the ESP_LOGD comment in the read loop.
     rx_buffer_size: 1024
 
   - id: mod_bus
@@ -206,6 +221,39 @@ globals:
     initial_value: '0'
   - id: crc_fail_count
     type: int
+    restore_value: no
+    initial_value: '0'
+
+  # Millis of the last successfully framed message, either channel. Drives the
+  # deaf-tap watchdog below. 0 means "nothing yet since boot".
+  - id: last_frame_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  # Consecutive watchdog reboots. MUST survive a reboot, otherwise the cap it
+  # enforces resets every time and cannot cap anything. Cleared the moment a
+  # frame arrives, so it only counts *unsuccessful* recovery attempts.
+  - id: wd_reboots
+    type: uint8_t
+    restore_value: yes
+    initial_value: '0'
+
+  # Raw bytes seen on each tap, counted before any framing. See the comment at
+  # the read loop for why these exist.
+  - id: rx_bytes_ac
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: rx_bytes_mod
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  # Millis of the last RAW BYTE from either tap. This, not last_frame_ms, is
+  # what the watchdog should trigger on -- see the watchdog comment.
+  - id: last_byte_ms
+    type: uint32_t
     restore_value: no
     initial_value: '0'
 
@@ -337,6 +385,27 @@ sensor:
     entity_category: diagnostic
     accuracy_decimals: 0
     update_interval: never
+
+  # Raw byte counters, published on a timer rather than per byte -- publishing
+  # per byte would flood the recorder at 115200 baud. 30 s matches the watchdog
+  # so a deaf period lines up in history with whichever counter stopped.
+  - platform: template
+    name: "RX Bytes AC"
+    id: ac_rx_bytes_ac
+    icon: mdi:swap-vertical
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 30s
+    lambda: 'return (float) id(rx_bytes_ac);'
+
+  - platform: template
+    name: "RX Bytes Module"
+    id: ac_rx_bytes_mod
+    icon: mdi:swap-vertical
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 30s
+    lambda: 'return (float) id(rx_bytes_mod);'
 
   - platform: template
     name: "Frames Decoded"
@@ -538,6 +607,26 @@ interval:
                                  : id(mod_bus).read_byte(&b);
             if (!got) break;
 
+            // *** RAW BYTE COUNTERS, PER CHANNEL -- diagnostic, not decoding.
+            // Counted BEFORE any framing logic, so they tick even for bytes
+            // that never become a frame.
+            //
+            // These exist because the 2026-08-10 outages could not be
+            // diagnosed from frame counts alone. Two hardware theories were
+            // proposed and both were wrong, because "no frames" is consistent
+            // with four different faults. Next time these separate them:
+            //
+            //   bytes rising, frames flat        -> framing/CRC, not wiring
+            //   bytes flat on ONE channel only   -> that channel's wire
+            //   bytes flat on BOTH               -> shared supply/ground,
+            //                                       or the source really did
+            //                                       stop talking
+            //
+            // Cheap to keep and it turns the next 20-minute intermittent into
+            // one glance instead of another evening of theories.
+            if (ch == 0) id(rx_bytes_ac)++; else id(rx_bytes_mod)++;
+            id(last_byte_ms) = millis();
+
             // Resynchronise on the header rather than trusting byte alignment.
             if (v.empty() && b != 0xA5) continue;
             v.push_back(b);
@@ -589,12 +678,45 @@ interval:
             for (uint8_t x : v) { sprintf(tmp, "%02X ", x); hex += tmp; }
             if (!hex.empty()) hex.pop_back();
 
-            ESP_LOGI(TAG, "%s %s [%2u] %s", dir,
+            // *** DEBUG, NOT INFO. THIS ONE LINE WAS THE BUG. ***
+            //
+            // As ESP_LOGI this fired on EVERY frame with a string up to ~270
+            // chars, written to UART0 AND pushed to every connected API log
+            // client -- from inside the lambda that must drain two UARTs every
+            // 10 ms. The loop fell behind, both RX buffers overran, and the
+            // ESP32 driver stopped delivering. Because both channels are
+            // serviced by this same loop they died TOGETHER, which is exactly
+            // what made it look like a shared-hardware fault and cost two
+            // wrong diagnoses (the level shifter, then a UART latch-up).
+            //
+            // Confirmed 2026-08-11 by changing only this call:
+            //
+            //   before   deaf after 5, 14, 20, 38 min
+            //   after    9.4 h continuous, 4221 frames, 0 rejects, 0 CRC fails
+            //
+            // *** rx_buffer_size was ALREADY 1024. The buffer was never the
+            // problem -- the loop was. Do not "fix" this by enlarging the
+            // buffer. ***
+            //
+            // Nothing is lost day to day: the `Last Frame` entity carries the
+            // same hex into Home Assistant. WHEN ACTIVELY MAPPING FIELDS, set
+            // `logger: level: DEBUG` to get the full per-frame stream back --
+            // and expect the stalls to return while it is on.
+            ESP_LOGD(TAG, "%s %s [%2u] %s", dir,
                      v[3] == 0x21 ? "REPORT" : (v[3] == 0x23 ? "ACK   " : "TYPE? "),
                      (unsigned) v.size(), hex.c_str());
 
             id(frame_count)++;
             id(ac_frames).publish_state(id(frame_count));
+            id(last_frame_ms) = millis();   // feeds the deaf-tap watchdog
+
+            // A frame proves recovery, so clear the watchdog's attempt counter.
+            // WITHOUT THIS the cap is permanent, not per-incident: wd_reboots
+            // has restore_value: yes, so after three watchdog restarts in the
+            // device's whole life it would never restart again. Guarded on
+            // != 0 because restore_value writes to flash, and this line runs
+            // on every single frame.
+            if (id(wd_reboots) != 0) id(wd_reboots) = 0;
 
             // Republishing an identical string on every broadcast would churn
             // the recorder for no information, so only publish on change.
@@ -1228,3 +1350,120 @@ interval:
             v.clear();
           }
           }
+
+  # ---------------------------------------------------------------------------
+  # DEAF-TAP WATCHDOG
+  #
+  # Twice on 2026-08-10 this node stopped receiving while staying perfectly
+  # healthy in every other respect: online over WiFi, pinging with 0% loss,
+  # globals intact (frame_count held its value, so it had NOT crashed or
+  # rebooted), and ZERO rejected frames and ZERO CRC failures -- meaning not one
+  # corrupt byte arrived either. Total silence on BOTH channels at once.
+  #
+  #   20:57:53 -> 21:35:24   deaf 37 min
+  #   21:40:19 -> 21:57:09   deaf 17 min, only ~5 min after recovering
+  #
+  # The first recovery followed an AC power cycle, which pointed at the level
+  # shifter, since its HV side is fed from harness YELLOW +5V and the ESP runs
+  # on USB. That was WRONG. Rebooting the ESP alone -- AC untouched -- brought
+  # reception back, so the shifter is exonerated and the fault is on this side.
+  #
+  # Most likely a wedged UART peripheral: an RX FIFO overrun during a burst that
+  # never gets cleared. Both channels dying together fits, because both are
+  # serviced by the same 10ms lambda, and if that loop falls behind during a
+  # power-on dump both FIFOs overflow at once.
+  #
+  # This node is listen-only and holds no state worth preserving, so a restart
+  # is a free recovery. Cheaper than diagnosing an intermittent that takes
+  # 20-40 minutes to reproduce.
+  #
+  # *** SILENCE IS ALWAYS ABNORMAL -- the bus does NOT go quiet when the AC is
+  # switched off. *** The WBR1 dongle runs from the head unit's standby supply,
+  # which is how the app can turn the unit on remotely, so it keeps talking
+  # regardless of run state. Proven in our own capture at 21:35:18-21:35:20 on
+  # 2026-08-10: a full state dump AND the module's `02 64` heartbeat arrived
+  # while `power` was off. An earlier draft of this watchdog was written around
+  # the false assumption that an off AC means a quiet bus, and would have been
+  # crippled by a grace period it did not need.
+  #
+  # The only genuinely quiet case is the head unit losing MAINS -- a breaker
+  # off for service. The reboot cap below exists solely for that, so the node
+  # does not reboot all night while the disconnect is pulled.
+  #
+  # *** TRIGGER ON RAW BYTES, NOT ON FRAMES. ***
+  # The first version watched last_frame_ms and needed a 6 min threshold,
+  # because frames are sparse and bursty. Bytes are not: the counters showed
+  # traffic arriving continuously right up to the instant the tap died. So
+  # byte-silence is a far sharper signal, and 2 min is both safer and 3x
+  # faster to recover than the 6 min frame-based version.
+  #
+  # 2 min is ~3x the slowest regular traffic (the ~60 s module heartbeat) and
+  # ~3x the longest healthy gap ever observed between bytes.
+  #
+  # This also removes a blind spot the frame version had: if bytes were
+  # arriving but nothing framed -- a CRC or alignment fault rather than a dead
+  # receiver -- the frame watchdog would reboot pointlessly, forever. Watching
+  # bytes means a reboot only happens for the failure a reboot actually fixes.
+  #
+  # The root cause was found on 2026-08-11 -- per-frame ESP_LOGI in the read
+  # loop, see the comment at that call. This watchdog is now a BACKSTOP rather
+  # than a daily necessity: 9.4 h continuous with zero trips after the fix,
+  # against 5-38 min before it. Keep it anyway; it costs nothing and it is what
+  # will catch the next regression (including someone leaving the logger on
+  # DEBUG).
+  #
+  # The 120 s threshold is now evidenced rather than guessed: across that 9.4 h
+  # run the longest legitimate gap between raw bytes was 60 s -- the module
+  # heartbeat -- so this sits at exactly 2x the slowest real traffic.
+  #
+  # The grace period is still needed: after the 21:57:09 reboot the first frame
+  # did not arrive for 7.5 min, unexplained. Rebooting into that would loop.
+  - interval: 30s
+    then:
+      - lambda: |-
+          static const char *const TAG = "aciq";
+          const uint32_t DEAF_MS  = 2 * 60 * 1000UL;    // byte-silence, not frames
+          const uint32_t GRACE_MS = 10 * 60 * 1000UL;   // > the 7.5 min seen
+          const uint8_t  MAX_TRIES = 3;
+
+          uint32_t up = millis();
+          if (up < GRACE_MS) return;                    // post-boot grace
+
+          uint32_t last = id(last_byte_ms);
+          bool deaf = (last == 0) || (up - last > DEAF_MS);
+
+          if (!deaf) {
+            // Bytes ARE arriving. If none of them have framed in a long while,
+            // that is a CRC or alignment fault, not a dead receiver -- and a
+            // reboot would not fix it. So warn, do not restart. This is the
+            // case the old frame-based watchdog would have rebooted on forever.
+            uint32_t lastf = id(last_frame_ms);
+            if (lastf != 0 && up - lastf > 10 * 60 * 1000UL) {
+              ESP_LOGW(TAG, "bytes arriving but nothing framed for %u min -- "
+                            "suspect CRC/alignment, NOT the receiver",
+                       (unsigned) ((up - lastf) / 60000UL));
+            }
+            return;
+          }
+
+          if (id(wd_reboots) >= MAX_TRIES) {
+            // Three restarts did not bring it back, so this is not the wedge
+            // we are trying to recover -- most likely mains is off. Stop
+            // rebooting and just say so; the counter clears itself the moment
+            // a frame arrives.
+            ESP_LOGW(TAG, "WATCHDOG: still deaf after %u restarts -- giving up. "
+                          "Check mains to the head unit.", (unsigned) id(wd_reboots));
+            return;
+          }
+          id(wd_reboots) = id(wd_reboots) + 1;
+          ESP_LOGW(TAG, "WATCHDOG: tap deaf %u s -- restart %u of %u",
+                   (unsigned) (last == 0 ? up / 1000UL : (up - last) / 1000UL),
+                   (unsigned) id(wd_reboots), (unsigned) MAX_TRIES);
+          App.safe_reboot();
+
+button:
+  # So the tap can be bounced from Home Assistant instead of walking out to the
+  # garage and unplugging USB. Added after doing exactly that twice.
+  - platform: restart
+    name: "Restart"
+    entity_category: diagnostic
