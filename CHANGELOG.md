@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-08-11 (later) — a falsified prediction, and input power vindicated
+
+**A prediction we published as a lead, then killed.** The remote manual's
+ECO/GEAR ladder ("up to 75 % / 50 % electrical energy consumption") made
+`0x32` = 50 in the `0x38` record look like the GEAR percentage, predicting
+`0x38 = 01 4B` (75) for LV2 under load. Tested at **80 % compressor / 900 W**:
+**LV2 released the limiter instead.** No payload other than `0x32` has ever been
+seen. The earlier "LV2 just needs more load to bite" excuse is also dead — it
+was tested at 80 % and failed.
+
+Corrected: **only LV1 engages the limiter**, at either load tested (48 % and
+80 %; at 80 % it pulled compressor target to 38 %). What LV2 and LV3 do is
+unknown. `0x32` stays unidentified and unlabelled.
+
+**`0x64` IS a function of compressor speed** — this document previously said it
+was not. Over 124 pairs with the compressor reading ≤30 s stale, correlation is
++0.69 and the low end is tight: 15 % → 280–300 W, 19 % → 330–350 W, 22 % →
+350–370 W, and **exactly 0 W whenever the compressor stops.**
+
+The reason for the earlier wrong call is now documented as a trap:
+**`0x64` only updates about every 12 minutes.** Any window shorter than that
+contains no update, so power looks frozen and therefore looks decoupled from
+load. A 90-second test halved the compressor and `0x64` never moved — that is
+the sampling rate, not the physics.
+
+**Also confirmed as composites rather than protocol fields**, joining Turbo:
+`MUTE` is simply fan speed 1 (the 1 % step), and `I SET` forces fan to AUTO.
+Neither introduces a new field id. The full fan ladder was captured in one
+sweep: 1 %, 25 %, 40 %, 55 %, 70 %, 85 %, 100 %, plus 0 = auto.
+
 ## 2026-08-11 — the listener kept going deaf, and it was a log call
 
 **If you are building an ESPHome UART sniffer from this repo, read this one.**

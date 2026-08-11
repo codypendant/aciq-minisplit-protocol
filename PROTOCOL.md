@@ -301,7 +301,7 @@ remainder as 2-byte records, skipping 6 bytes whenever a wide id appears.
 | `0x2D` | **Generator mode** | 1 byte | `0` off · `1` LV1 · `2` LV2 · `3` LV3 — a compressor power limiter |
 | `0x38` | **Power limit engaged** | length-prefixed | Same encoding as `0x39`. Present only while the limiter bites |
 | `0x60` | **Outdoor AIR temperature** | centi-°C | **Only reported while the outdoor unit is energised** — silent across 5 hours of idle |
-| `0x64` | **Input power** | 16-bit, W | 620–930 at partial load, 0 when off. The app has a power-usage tracker, so the unit must report this |
+| `0x64` | **Input power** | 16-bit, W | Quantised to 10 W; exactly 0 when the compressor stops. **Updates only ~every 12 min** — see [Input power](#input-power) before using it |
 | `0xC0` | **Compressor target** | 16-bit, % | Commanded speed. Jumps straight to value on start |
 | `0x65` | **Compressor actual** | 16-bit, % | Ramps up to meet `0xC0` |
 | `0x41`, `0x42` | Unix timestamps | 32-bit | In `0D 0D` clock frames |
@@ -386,9 +386,12 @@ be discovered on the wire.
 The app's **"generator mode"** sub-screen offers LV1/LV2/LV3. `0x2D` carries it
 directly: `0` off, `1` LV1, `2` LV2, `3` LV3.
 
-**LV1 is the restrictive end**, and that was confirmed by watching the machine
-rather than by reasoning about the numbers: LV1 pulled compressor target
-48 % → 44 % → 42 %; LV2 released it straight back to 48 %.
+**Only LV1 engages the limiter.** Tested at two very different loads:
+
+| Load at press | LV1 | LV2 | LV3 |
+|---|---|---|---|
+| compressor 48 % | target 48 → 42 | released | nothing |
+| compressor 80 % | target **80 → 38** | released (38 → 56) | nothing |
 
 `0x38` rides alongside it and uses **the same length-prefixed encoding as
 `0x39`** — adjacent ids, one family. It appears only while the limiter is
@@ -399,10 +402,29 @@ actually biting:
 00 38 00      len 0, empty          -- RELEASED
 ```
 
-It tracks **engagement, not level**: LV3 and off produced no `0x38` at all,
-because it had already released. **What `0x32` (= 50) means is not
-established** — do not read it as a percent, since a 50 % cap would not clamp a
-48 % demand.
+It tracks **engagement, not level**, and `0x32` is the **only** payload ever
+observed.
+
+#### A prediction we made and then falsified
+
+The remote manual documents an ECO/GEAR ladder as "up to 75 % / 50 %
+**electrical energy consumption**", which made `0x32` = 50 look like the GEAR
+percentage, with LV1 = 50 % and LV2 = 75 %. The obvious objection — that a 50 %
+cap cannot clamp a 48 % demand — dissolves once you notice those are different
+scales (input watts vs compressor speed).
+
+**It was tested and it is wrong.** The prediction was that LV2 under real load
+would give `0x38 = 01 4B` (0x4B = 75). At 80 % compressor and 900 W, **LV2
+released the limiter instead**, exactly as it had at 48 %. No value other than
+`0x32` has ever appeared.
+
+Two further points against reading `0x32` as a percentage of anything obvious:
+LV1 clamped the compressor target to **38 %**, not 50 %; and the load excuse is
+gone, since "LV2 needs more demand to bite" was tested at 80 % and failed.
+
+**So: `0x2D` selects a level, only LV1 limits, and what LV2 and LV3 are for is
+unknown.** They may need a load beyond this unit's capacity, or be inert on this
+model. `0x32` remains unidentified — do not label it.
 
 ### `0x39` is a length-prefixed list, not a record
 
@@ -534,18 +556,36 @@ cold start makes this unambiguous:
 for the compressor and air handler, and actual chases commanded the way a
 servo-tracked percentage does.
 
+### Input power
+
 Input power tracks the ramp exactly — 130 → 260 → 420 → 660 → 840 → 910 W,
 settling near 850 W.
 
-**`0x64` is instantaneous draw, not a function of compressor speed.** Do not try
-to model consumption from `0x65`:
+**`0x64` IS a function of compressor speed** — an earlier version of this
+document said it was not, on the strength of a handful of samples taken minutes
+apart. Over 124 pairs where the compressor reading was **no more than 30 s
+stale**, correlation is **+0.69**, and the low end is tight and monotonic:
 
 | compressor | power |
 |---|---|
-| 0% | 0 W |
-| 15% | 220 W |
-| 28% | 630 W |
-| 86% | 850 W |
+| 0 % | **exactly 0 W, every time** |
+| 15 % | 280–300 W |
+| 19 % | 330–350 W |
+| 20 % | 340 W |
+| 22–23 % | 350–370 W |
+
+Reading exactly zero whenever the compressor stops is the strongest single
+argument that this is a real meter rather than a nameplate or synthetic value.
+Values are always multiples of 10, so it is quantised to 10 W.
+
+> **`0x64` UPDATES ONLY ABOUT EVERY 12 MINUTES** (238 updates in 48 h). This is
+> the trap that produced the wrong conclusion. Any observation window shorter
+> than that contains **no update at all**, so power looks frozen and therefore
+> looks decoupled from load. It is not — it is just slow.
+>
+> A 90-second generator-mode test halved the compressor and `0x64` never moved.
+> That is the sampling rate, not the physics. **Do not pair `0x64` against
+> anything without checking how stale it is.**
 
 Every cycle ramps 50 → 900 W and then settles, so a given speed maps to
 different readings depending on where in the cycle you sample. Integrate the
