@@ -215,8 +215,18 @@ because the mapping is verified but the number cannot be wrong.
 speed (`12=02` arrives with `05=02`). Setting mode alone may change more than
 mode.
 
-The airflow controls `0x0E` / `0x11` (8 and 9 positions) remain deliberately
-unmapped — decoded far enough to prove the record encoding, then left alone.
+### Louvers — and a correction
+
+`0x11` is the **vertical** louver (8 buttons) and `0x0E` is the **horizontal**
+one (9). Earlier versions of these documents had that **backwards**, having
+inferred the axes from state counts in a capture rather than checking. Both
+axes share one encoding — bit 3 clear means sweeping (the app's "Flow"), bit 3
+set means parked ("Fix"), and bits 0–2 are a 1-based index. Full table in
+[PROTOCOL.md](PROTOCOL.md#louvers).
+
+**Turbo is not a field.** It is a macro: fan to speed 7 / 100 %, fan-auto off,
+compressor target raised, both louvers to `0x08`. Everything reverts when it is
+switched off.
 
 ## Where this stops
 

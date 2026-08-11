@@ -229,7 +229,41 @@ Walking those as 2-byte records splits them and **invents a phantom field**.
 Room temperature first appeared as a bogus `0A=D2` for precisely this reason.
 
 Known wide fields: `0x02`, `0x03`, `0x5C`, `0x60`, `0x64`, `0x65`, `0x72`,
-`0xC0`.
+`0xC0`, and — added 2026-08-10 — `0x95`, `0xBD`, `0xBE`, `0xBF`.
+
+#### How to settle a field's width without guessing
+
+Those last four were missing from the list for weeks, and the way they were
+found generalises. **Walk the record both ways and see which one lands on a
+real next id.** Field id `0x00` does not exist, so the reading that produces it
+is the wrong one:
+
+| Field | As narrow → next id | As wide → next id | Verdict |
+|---|---|---|---|
+| `0x95` | `0x00` | `0x15` (Health) | **wide** |
+| `0xBD` | `0x00` | `0xBE` | **wide** |
+| `0xBE` | `0x00` | `0xBF` | **wide** |
+| `0xBF` | `0x00` | `0xC0` | **wide** |
+| `0xA4` | `0xBD` | `0x00` | **narrow** |
+
+Note `0xA4` sits in the middle of that run, looks identical at a glance, and
+goes the *other* way. Sweeping it in with its neighbours would desynchronise
+every record after it.
+
+**Why this hid for so long, and the lesson in it.** Walking a wide field as
+narrow costs 3 bytes and produces a phantom `00=00` record — which also costs 3
+bytes. `3 + 3 == 6`, so **alignment survives and nothing downstream ever
+breaks.** The frame simply grows fields that were never sent. The symptom was a
+plausible-looking
+
+```
+95=00 00=00 A4=00 BD=00 00=00 BE=00 00=00 BF=00 00=00
+```
+
+of which six of the ten entries did not exist.
+
+> **A parse that stays aligned is not a parse that is correct.** Self-consistency
+> proves nothing here; only a cross-check against a *real* next id does.
 
 **The encoding is genuinely ambiguous without a schema.** A narrow record whose
 value is zero is byte-identical to the start of a wide field: `0C 00 00 0D 00 00`
@@ -262,8 +296,10 @@ remainder as 2-byte records, skipping 6 bytes whenever a wide id appears.
 | `0x13` | **Eco mode** | 1 byte | `0`/`1`. `0xDF` moves in lockstep with it |
 | `0x72` | Fan percent | 1 byte | 1 / 25 / 40 / 55 / 70 / 85 / 100, tracks `0x05` |
 | `0x5C` | **Indoor coil temperature** | centi-°C | 10–13 °C while cooling; warms to ambient when off |
-| `0x0E` | Vertical airflow | 1 byte | 8 positions per the app |
-| `0x11` | Horizontal airflow | 1 byte | 9 positions per the app; observed set is exactly `01 02 03 08 09 0A 0B 0C 0D` |
+| `0x11` | **Vertical louver** | 1 byte | 8 buttons — see [Louvers](#louvers) |
+| `0x0E` | **Horizontal louver** | 1 byte | 9 buttons — see [Louvers](#louvers) |
+| `0x2D` | **Generator mode** | 1 byte | `0` off · `1` LV1 · `2` LV2 · `3` LV3 — a compressor power limiter |
+| `0x38` | **Power limit engaged** | length-prefixed | Same encoding as `0x39`. Present only while the limiter bites |
 | `0x60` | **Outdoor AIR temperature** | centi-°C | **Only reported while the outdoor unit is energised** — silent across 5 hours of idle |
 | `0x64` | **Input power** | 16-bit, W | 620–930 at partial load, 0 when off. The app has a power-usage tracker, so the unit must report this |
 | `0xC0` | **Compressor target** | 16-bit, % | Commanded speed. Jumps straight to value on start |
@@ -284,6 +320,89 @@ Setpoint steps are **0.50 °C**, and the trailing °F byte on setpoint frames is
 **For control, send centi-°C.** For the observed points,
 `centi_c = 2700 + (degF − 81) × 50`. A plain °F→°C conversion lands between
 steps.
+
+### Louvers
+
+**Earlier versions of this document had the two axes swapped**, and the state
+counts swapped with them. Corrected here.
+
+`0x11` is the **vertical** louver and `0x0E` is the **horizontal** one. Both use
+the same encoding:
+
+```
+bit 3 (0x08) CLEAR -> sweeping, the app's "... Flow"
+bit 3 (0x08) SET   -> parked,   the app's "... Fix"
+bits 0-2           -> 1-based index within that group
+```
+
+| `0x11` **vertical** | | `0x0E` **horizontal** | |
+|---|---|---|---|
+| `01` | Up-Down Flow | `01` | Left-Right Flow |
+| `02` | Up Flow | `02` | Left Flow |
+| `03` | Down Flow | `03` | Middle Flow |
+| — | | `04` | Right Flow |
+| `09` | Up Fix | `09` | Left Fix |
+| `0A` | Above Up Fix | `0A` | A Bit Left Fix |
+| `0B` | Middle Fix | `0B` | Middle Fix |
+| `0C` | Above Down Fix | `0C` | A Bit Right Fix |
+| `0D` | Down Fix | `0D` | Right Fix |
+
+**How this was established, and why the earlier version was wrong.** The first
+attempt inferred the axes from state *counts* found in a capture. That is
+exactly the plausibility trap this project keeps hitting. The fix was to press
+all 17 buttons in the app's **"Precision Air Flow"** screen, left to right, and
+read the labels off the screen: the **"Up-Down Flow Control"** tab has 8 buttons
+and drove `0x11`; **"Left-Right Flow Control"** has 9 and drove `0x0E`.
+
+The structure gave itself away as a **gap at `05`–`08`** in both fields — there
+is no Flow #5 and no Fix #0.
+
+**`0x08` is real and no button produces it.** Both axes report `0x08` the moment
+**Turbo** is pressed on the handheld, in the same frame that takes the fan to
+speed 7 / 100 % and clears fan-auto. Likely "no user-selected position, the unit
+is driving the louver" — but that is **one observation and is not verified**, so
+it is deliberately left unnamed in the decoder. `0x10` has also been seen on
+`0x0E` and is unexplained.
+
+**`0x0C` / `0x0D` are not the per-axis companions** an earlier draft claimed.
+Across all 17 louver presses neither appeared once.
+
+### Turbo is a composite, not a field
+
+There is no turbo bit. Pressing Turbo on the handheld changes only fields that
+are already mapped, and releasing it reverts every one:
+
+```
+fan_speed    0 (auto) -> 7        fan_auto           on -> off
+fan_percent  0 -> 100             compressor_target  66 -> 86
+both louvers -> 0x08
+```
+
+So a turbo control is a **macro over existing fields**, not something still to
+be discovered on the wire.
+
+### Generator mode — `0x2D`, a compressor power limiter
+
+The app's **"generator mode"** sub-screen offers LV1/LV2/LV3. `0x2D` carries it
+directly: `0` off, `1` LV1, `2` LV2, `3` LV3.
+
+**LV1 is the restrictive end**, and that was confirmed by watching the machine
+rather than by reasoning about the numbers: LV1 pulled compressor target
+48 % → 44 % → 42 %; LV2 released it straight back to 48 %.
+
+`0x38` rides alongside it and uses **the same length-prefixed encoding as
+`0x39`** — adjacent ids, one family. It appears only while the limiter is
+actually biting:
+
+```
+00 38 01 32   len 1, payload 0x32   -- ENGAGED
+00 38 00      len 0, empty          -- RELEASED
+```
+
+It tracks **engagement, not level**: LV3 and off produced no `0x38` at all,
+because it had already released. **What `0x32` (= 50) means is not
+established** — do not read it as a percent, since a 50 % cap would not clamp a
+48 % demand.
 
 ### `0x39` is a length-prefixed list, not a record
 
@@ -327,8 +446,20 @@ not conclusions.**
 | Id | Values seen | Hypothesis |
 |---|---|---|
 | `0x06` | `40`, `A4` | — |
-| `0x13`, `0x15`, `0xDF` | 0/1 toggles | Feature flags |
-| `0x38`, `0x3D`, `0x74`, `0x95`, `0xA4`, `0xBD`–`0xBF` | mostly constant | — |
+| `0xDF` | 0/1 toggle | Moves in lockstep with eco (`0x13`) |
+| `0x17`, `0x35`, `0x47`, `0x48`, `0x5E`, `0x74`, `0xA4`, `0xC9` | narrow, near-constant | — |
+| `0x95`, `0xBD`, `0xBE`, `0xBF` | **wide**, all zero so far | — |
+| `0x3D` | never actually observed | — |
+
+**These do not respond to any user-facing control.** A full sweep on 2026-08-10
+— all 17 louver buttons, all four generator levels, Turbo, I Feel, I Set —
+surfaced exactly two new ids, `0x2D` and `0x38`, both from generator mode.
+Nothing else moved. Pressing buttons is not the way to crack the rest; they are
+most likely diagnostics or configuration.
+
+**`0x13` and `0x15` are no longer in this list** — they are eco and health
+respectively, both confirmed. Ditto `0x38`, now understood as the generator
+limiter's companion.
 
 **Outdoor temperature was field `0x60`**, found exactly this way — it is
 centi-°C like `0x02` and `0x03`, and it was confirmed by comparing against a

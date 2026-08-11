@@ -121,7 +121,7 @@
 
 substitutions:
   device_name: aciq-listen
-  humanly_name: "Mini Split Listener"
+  humanly_name: "Garage Mini Split Listener"
 
   # RED = the AC's transmit line, through the level shifter.
   # GPIO16 is the ESP32's native UART2 RX, so this maps to real UART hardware.
@@ -331,6 +331,14 @@ sensor:
     update_interval: never
 
   - platform: template
+    name: "Generator Mode (raw)"
+    id: ac_generator_raw
+    icon: mdi:engine
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
     name: "Frames Decoded"
     id: ac_frames
     icon: mdi:counter
@@ -455,6 +463,38 @@ text_sensor:
     name: "Mode"
     id: ac_mode_name
     icon: mdi:hvac
+    update_interval: never
+
+  # Louver position, both axes. Field 0x11 is the VERTICAL louver and 0x0E is
+  # the HORIZONTAL one -- note that is the opposite of what this file assumed
+  # until 2026-08-10. Established by pressing every button in the app's
+  # "Precision Air Flow" screen left-to-right and matching the captured values
+  # against the app's own labels: the "Up-Down Flow Control" tab has 8 buttons
+  # and drove 0x11, the "Left-Right Flow Control" tab has 9 and drove 0x0E.
+  - platform: template
+    name: "Vertical Louver"
+    id: ac_louver_v
+    icon: mdi:arrow-up-down
+    update_interval: never
+
+  - platform: template
+    name: "Horizontal Louver"
+    id: ac_louver_h
+    icon: mdi:arrow-left-right
+    update_interval: never
+
+  # Field 0x2D rendered as a name. Raw kept alongside, same reasoning as Mode.
+  - platform: template
+    name: "Generator Mode"
+    id: ac_generator
+    icon: mdi:engine
+    update_interval: never
+
+  # Field 0x38 -- only present while the generator limiter is actually biting.
+  - platform: template
+    name: "Power Limit"
+    id: ac_power_limit
+    icon: mdi:speedometer-slow
     update_interval: never
 
   # Commands seen on the module's transmit line (0A 0A payloads) -- what the
@@ -597,6 +637,12 @@ interval:
                 switch (fid) {
                   case 0x02: case 0x03: case 0x5C: case 0x60:
                   case 0x64: case 0x65: case 0x72: case 0xC0:
+                  case 0x95: case 0xBD: case 0xBE: case 0xBF:
+                               // Kept in step with the report walk below on
+                               // purpose. These four have only ever been seen
+                               // in reports, never commanded -- but if one ever
+                               // is, a mismatched width here would desynchronise
+                               // the whole command frame.
                     wide = (i + 4 < n && v[i+1] == 0x00 && v[i+2] == 0x00);
                     break;
                   default: break;
@@ -673,8 +719,14 @@ interval:
                   case 0x01: case 0x05: case 0x0C: case 0x0D:   // narrow
                   case 0x0E: case 0x11: case 0x12: case 0x13:
                   case 0x73: case 0xDF:
+                  case 0x2D:                                    // generator mode
+                  case 0x38: case 0x39:                         // length-prefixed
                   case 0x02: case 0x03: case 0x5C:              // wide
                   case 0x60: case 0x64: case 0x65: case 0x72: case 0xC0:
+                  case 0x95: case 0xBD: case 0xBE: case 0xBF:   // wide, unidentified
+                               // -- reported by the main walk now, with their
+                               // true 16-bit value. Excluded here so they are
+                               // not ALSO surfaced with a bogus degF reading.
                     break;                      // already understood
                   default: {
                     // Only surface values in a plausible thermistor band.
@@ -802,6 +854,44 @@ interval:
                   continue;
                 }
 
+                // 0x95 / 0xBD / 0xBE / 0xBF are ALSO wide, and were missing
+                // from the list above. The 3-byte walk therefore chewed each
+                // one into a real record PLUS a phantom `00=00`, which is why
+                // Unknown Fields read
+                //   95=00 00=00 A4=00 BD=00 00=00 BE=00 00=00 BF=00 00=00
+                // Six of those ten entries did not exist.
+                //
+                // Established 2026-08-10 by a width discriminator that does
+                // not rely on plausibility: walk the record BOTH ways and see
+                // which one lands on a real next id.
+                //
+                //     0x95  narrow -> next id 0x00     wide -> 0x15 (Health)
+                //     0xBD  narrow -> next id 0x00     wide -> 0xBE
+                //     0xBE  narrow -> next id 0x00     wide -> 0xBF
+                //     0xBF  narrow -> next id 0x00     wide -> 0xC0
+                //     0xA4  narrow -> next id 0xBD     wide -> 0x00
+                //
+                // Field id 0x00 is not a thing, so the reading that produces
+                // it is the wrong one. Note 0xA4 goes the OTHER way -- it is
+                // genuinely narrow. Do not "tidy" it into this group.
+                //
+                // Alignment survived either way (3+3 == 6), which is exactly
+                // why this hid for so long: nothing downstream broke, the
+                // frame just grew six fields that were never sent.
+                //
+                // These stay in Unknown Fields rather than being skipped
+                // silently -- they are still unidentified, and their real
+                // 16-bit value is what will eventually identify them.
+                if ((fid == 0x95 || fid == 0xBD || fid == 0xBE || fid == 0xBF) &&
+                    i + 4 < n && v[i+1] == 0x00 && v[i+2] == 0x00) {
+                  uint16_t wv = ((uint16_t) v[i+3] << 8) | v[i+4];
+                  char t[24];
+                  sprintf(t, "%02X=%u(w) ", fid, wv);
+                  unknown += t;
+                  i += 6;
+                  continue;
+                }
+
                 // NAMESPACES. The byte before each id is not a separator,
                 // it is a NAMESPACE selector:
                 //
@@ -867,6 +957,47 @@ interval:
                   }
                 }
 
+                // 0x38 is the SAME length-prefixed encoding as 0x39 above --
+                // adjacent ids, one family. Established 2026-08-10 during the
+                // generator-mode test: it is emitted only when the power
+                // limiter actually engages, and its width tracks its content.
+                //
+                //   00 38 01 32   len 1, payload 0x32 -- limiter ENGAGED
+                //   00 38 00      len 0, empty        -- limiter RELEASED
+                //
+                // Sequence that established it: LV1 (2D=01) pulled compressor
+                // target 48 -> 44 -> 42 and 0x38 went to len-1; LV2 (2D=02)
+                // let it back to 48 and 0x38 went empty. LV3 and off produced
+                // no 0x38 at all, because it had already released -- so this
+                // tracks ENGAGEMENT, not which level is selected.
+                //
+                // What 0x32 (=50) means is NOT established. Do not label it a
+                // percent: a 50% cap would not clamp a 48% demand, so that
+                // reading is already suspect. More data needed with the
+                // compressor driven near 100%.
+                if (fid == 0x38 && i + 1 < n) {
+                  uint8_t len = v[i + 1];
+                  if (i + 2 + (size_t) len <= n) {
+                    std::string s;
+                    if (len == 0) {
+                      s = "released";
+                    } else {
+                      char t[8];
+                      s = "engaged (";
+                      for (uint8_t k = 0; k < len; k++) {
+                        sprintf(t, "%02X ", v[i + 2 + k]);
+                        s += t;
+                      }
+                      s.erase(s.size() - 1);
+                      s += ")";
+                    }
+                    id(ac_power_limit).publish_state(s);
+                    mapped = true;
+                    i += (size_t) len + 3;      // fid + len + payload + sep
+                    continue;
+                  }
+                }
+
                 i += 3;
                 switch (fid) {
                   case 0x01:   // POWER -- confirmed: toggled 00/01/00/01
@@ -893,17 +1024,83 @@ interval:
                   case 0x05:   // FAN -- 7 speeds + auto, so do not clamp tight
                     if (val <= 15) { id(ac_fan_speed).publish_state(val); mapped = true; }
                     break;
-                  case 0x0E:   // up/down flow  -- decoded, not wanted
-                  case 0x11:   // left/right flow
-                  case 0x0C:   // per-axis enable companions
-                  case 0x0D:
-                               // NOTE: these four must keep their OWN break.
+                  // ---- LOUVERS ----------------------------------------
+                  // Encoding, confirmed 2026-08-10 across all 17 buttons:
+                  //   bit 3 (0x08) CLEAR -> sweeping, the app's "... Flow"
+                  //   bit 3 (0x08) SET   -> parked,   the app's "... Fix"
+                  //   bits 0-2           -> 1-based index within that group
+                  // The tell was a gap at 05-08 in both fields: there is no
+                  // Flow #5 and no Fix #0. Values 1-4 and 9-13 are the only
+                  // ones any BUTTON produces.
+                  //
+                  // But 0x08 is real and the app cannot produce it. Both axes
+                  // reported 0x08 the instant TURBO was pressed on the handheld
+                  // (2026-08-10 19:18:15), in the same frame that took the fan
+                  // to speed 7 / 100% and cleared fan-auto. Reading: bit 3 set
+                  // with index 0 means "no user-selected position -- the unit
+                  // is driving the louver itself". That reading is ONE
+                  // observation and is NOT verified; it is left unnamed here on
+                  // purpose. 0x10 has also been seen historically on 0x0E and
+                  // is likewise unexplained.
+                  case 0x11: {   // VERTICAL -- "Up-Down Flow Control", 8 buttons
+                    static const char *const V_FLOW[3] =
+                      {"Up-Down Flow", "Up Flow", "Down Flow"};
+                    static const char *const V_FIX[5] =
+                      {"Up Fix", "Above Up Fix", "Middle Fix",
+                       "Above Down Fix", "Down Fix"};
+                    uint8_t idx = val & 0x07;
+                    const char *nm = nullptr;
+                    if (val & 0x08) { if (idx >= 1 && idx <= 5) nm = V_FIX[idx - 1]; }
+                    else            { if (idx >= 1 && idx <= 3) nm = V_FLOW[idx - 1]; }
+                    if (nm != nullptr) id(ac_louver_v).publish_state(nm);
+                    else { char b[24]; sprintf(b, "unnamed (0x%02X)", (unsigned) val);
+                           id(ac_louver_v).publish_state(b); }
+                    mapped = true;
+                    break;
+                  }
+                  case 0x0E: {   // HORIZONTAL -- "Left-Right Flow Control", 9 buttons
+                    static const char *const H_FLOW[4] =
+                      {"Left-Right Flow", "Left Flow", "Middle Flow", "Right Flow"};
+                    static const char *const H_FIX[5] =
+                      {"Left Fix", "A Bit Left Fix", "Middle Fix",
+                       "A Bit Right Fix", "Right Fix"};
+                    uint8_t idx = val & 0x07;
+                    const char *nm = nullptr;
+                    if (val & 0x08) { if (idx >= 1 && idx <= 5) nm = H_FIX[idx - 1]; }
+                    else            { if (idx >= 1 && idx <= 4) nm = H_FLOW[idx - 1]; }
+                    if (nm != nullptr) id(ac_louver_h).publish_state(nm);
+                    else { char b[24]; sprintf(b, "unnamed (0x%02X)", (unsigned) val);
+                           id(ac_louver_h).publish_state(b); }
+                    mapped = true;
+                    break;
+                  }
+                  case 0x2D: {  // GENERATOR MODE -- the app's "generator mode"
+                                // sub-screen, LV1/LV2/LV3. A generator power
+                                // limiter: it caps what the compressor may
+                                // draw so a genset is not overloaded.
+                                // Confirmed 2026-08-10, exact 1:1 with four
+                                // presses in the order LV1, LV2, LV3, off.
+                                // LV1 is the RESTRICTIVE end -- it pulled
+                                // compressor target 48% -> 42%; LV2 released
+                                // it straight back to 48%.
+                    static const char *const GEN[4] = {"off", "LV1", "LV2", "LV3"};
+                    id(ac_generator_raw).publish_state(val);
+                    if (val < 4) id(ac_generator).publish_state(GEN[val]);
+                    else { char b[24]; sprintf(b, "unmapped (%u)", (unsigned) val);
+                           id(ac_generator).publish_state(b); }
+                    mapped = true;
+                    break;
+                  }
+                  case 0x0C:   // Previously believed to be per-axis companions
+                  case 0x0D:   // of the two louver fields. They are NOT: across
+                               // all 19 louver presses on 2026-08-10 neither
+                               // appeared even once. Still unexplained.
+                               // NOTE: these two must keep their OWN break.
                                // Appending a case label to the end of this
-                               // group once made all four fall through into
-                               // the eco-mode publish below, so Eco Mode
-                               // flapped ON/OFF/ON across the three frames of
-                               // a single state dump -- 0E=08 set it, a real
-                               // 13=00 cleared it, then 0C=1C set it again.
+                               // group once made them fall through into the
+                               // eco-mode publish below, so Eco Mode flapped
+                               // ON/OFF/ON across the three frames of a single
+                               // state dump.
                     mapped = true;
                     break;
                   case 0x1E:   // LIGHT -- the display LED. App toggle,
