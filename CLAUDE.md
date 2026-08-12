@@ -11,6 +11,28 @@ split. It is **public**, and it exists for a specific reason the owner stated:
 Write for **a stranger who owns this hardware and is stuck**, not as personal
 notes. That framing decides most style questions.
 
+## Before you commit, run the checks
+
+```
+python3 tools/check-docs.py
+```
+
+Non-zero exit means something drifted. It verifies that every link and anchor
+resolves, that the layout block matches the filesystem both ways, that no
+retracted claim has crept back in, that the README entity table covers every
+entity the config publishes, that every frame in `captures/` still passes
+`tools/crc.py`, and that no literal credential reached the published config.
+
+**When a claim is disproved, add its wording to `RETRACTED` in that script.**
+That is what stops it reappearing three files away six weeks later. The list
+already carries every claim this project has had to withdraw.
+
+This exists because the field map was corrected carefully every single time and
+the prose around it never was. A sweep on 2026-08-11 found the frame table still
+calling the checksum "Unsolved", the Quick start recommending the debugging dead
+end that had cost an evening, an entity table listing 14 of 30+ entities, and a
+roadmap asking for work already finished. None of it needed judgement to catch.
+
 ## Non-negotiables
 
 - **No personal information.** No real IPs, MACs, module serials, SSIDs, emails,

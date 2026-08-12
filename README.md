@@ -104,6 +104,8 @@ Live Home Assistant sensors, decoded from the appliance's own reporting:
 | Module WiFi Signal | `02 64` param | dBm, reported by the module itself |
 | Frames Decoded / Rejected / CRC Failures | — | Health. Rejected and CRC failures should stay at zero |
 | RX Bytes AC / Module | — | Raw bytes per tap, counted **before** framing. See [gotcha 5](METHOD.md#5-logging-every-frame-at-info--it-silently-wedges-the-uart) |
+| Last Command | `0A 0A` frames | What the **app** asked for. Remote presses never appear here — they arrive over IR and only show as state changes |
+| Wide Fields | — | Unclaimed 32-bit fields, with a centi-°C reading alongside so a thermistor is obvious |
 | Last Frame · Last Unmapped · Unknown Fields | — | The mapping queue for anything not yet identified |
 
 **The AC reports state on its own.** It does not need to be polled. That single
@@ -305,6 +307,7 @@ METHOD.md                    how it was decoded, and the dead ends
 CHANGELOG.md                 what changed, and which claims were corrected
 esphome/aciq-listen.yaml     the listener
 captures/reference-frames.txt  annotated real frames, one per message type
+tools/check-docs.py          documentation drift checks -- run before committing
 tools/crc.py                 checksum: verify, compute, apply
 tools/decode_csv.py          Kingst LA1010 CSV -> frames
 tools/decode_bin.py          Kingst LA1010 binary -> frames
