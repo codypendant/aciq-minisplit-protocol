@@ -1,14 +1,15 @@
 # ACiQ mini split — local protocol
 
-Reverse-engineered UART protocol for an **ACiQ K18W** wall-mount mini split
-whose only smart interface is a cloud-bound WiFi dongle, plus an ESPHome node
-that decodes the appliance's own bus into Home Assistant sensors **without
-transmitting a single byte**.
+Reverse-engineered UART protocol for an **ACiQ `ACIQ-K18W-W-32-HP2300`**
+wall-mount mini split whose only smart interface is a cloud-bound WiFi dongle,
+plus an ESPHome node that decodes the appliance's own bus into Home Assistant
+sensors **without transmitting a single byte**.
 
 The unit ships with a **TCL WBR1** WiFi module on the indoor board's `CN-16`
 header. It talks to TCL's servers and nothing else — no LAN protocol, no local
 API. The bus between that module and the mainboard, however, carries everything:
-power, mode, setpoint, room temperature, fan speed, blower RPM.
+power, mode, setpoint, room and coil temperatures, outdoor air temperature, fan
+speed, louver positions, compressor speed and input power.
 
 This documents that bus.
 

@@ -124,8 +124,10 @@ Protocol decoded from four logic-analyser captures and a live listener.
 - Message types `0x21` report / `0x23` acknowledgment; ACK echoes the counter at ~50 ms
 - Payload record encoding, including the 2-byte final record and 32-bit wide fields
 - Power `0x01`, setpoint `0x02`, room temperature `0x03`, fan `0x05`,
-  mode `0x12`, fan percent `0x72`, blower RPM `0x5C`, airflow `0x0E`/`0x11`,
-  clock timestamps `0x41`/`0x42`
+  mode `0x12`, fan percent `0x72`, ~~blower RPM~~ `0x5C`, airflow
+  `0x0E`/`0x11`, clock timestamps `0x41`/`0x42`
+  — *`0x5C` was later identified as the **indoor coil thermistor**, and the two
+  airflow fields were later found to be swapped; see the entries above*
 - Setpoint and room temperature are centi-degrees **Celsius**; the °F byte is a
   rounded display label
 - Power-on emits a complete state dump unasked

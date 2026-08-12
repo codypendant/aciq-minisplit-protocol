@@ -1,6 +1,7 @@
 # Working on this repo
 
-This documents a UART protocol reverse-engineered from an **ACiQ K18W** mini
+This documents a UART protocol reverse-engineered from an
+**ACiQ `ACIQ-K18W-W-32-HP2300`** mini
 split. It is **public**, and it exists for a specific reason the owner stated:
 
 > these projects weren't very well documented online, I would like to make this
