@@ -40,9 +40,18 @@ This repo's value is that its claims are *measured*. Protect that.
   it stops, a coil warms to ambient. Check boundaries, not plausibility.
 - **A value stuck at a constant is a parse bug until proven otherwise.** Field
   `0x72` published a constant 0 because a wide field was being read as narrow.
-- **Mark unverified things unverified.** Mode values `0x12` = 0–4 are exposed as
-  a raw integer precisely because which number means "heat" was never confirmed.
-  A guess here produces an entity that heats when asked to cool.
+- **Mark unverified things unverified**, and leave them unnamed in the decoder
+  rather than guessing a label. Two live examples: the `0x32` payload in an
+  engaged `0x38` record looked exactly like the manual's GEAR "50 %", and the
+  prediction that followed from it was **tested and falsified**; and `0x08` on
+  both louver fields is published as `unnamed (0x08)` because it has been seen
+  in only one situation. `0x12` used to be the example here — it is now verified
+  by pressing each mode in the app, which is what promotion out of this list
+  should require.
+- **A named field is a claim about hardware.** Say how it was established, not
+  just what it is, and prefer the check that could have gone the other way —
+  a boundary, a cross-reference against the app's own labels, or an effect you
+  can watch the machine perform.
 
 ## Things already tried — do not redo them
 
@@ -51,6 +60,16 @@ This repo's value is that its claims are *measured*. Protect that.
   pulse-width census: 2347/2347 pulses match 115200, 0/2347 match 9600.
 - **Guessing CRC parameters.** Seven polynomials, both bit orders, both byte
   orders, every contiguous span — all failed, for two days. See below.
+- **Blaming hardware when the tap goes deaf.** The level shifter and a UART
+  latch-up were both diagnosed confidently and both were wrong. The cause was
+  `ESP_LOGI` per frame inside the read loop starving the UARTs. `rx_buffer_size`
+  was already 1024 and is not the fix. Check `RX Bytes AC` / `RX Bytes Module`
+  first — they count before framing, so they say whether bytes are arriving at
+  all. See `METHOD.md` gotcha 5.
+- **Reading button presses off the bus.** The remote batches fast presses and
+  transmits only the settled value, so eight quick presses look identical to one
+  command. Attribution comes from knowing which button was pressed, never from
+  the shape of the traffic. See `METHOD.md` gotcha 6.
 
 ## The checksum, and the lesson in it
 

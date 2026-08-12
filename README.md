@@ -72,7 +72,7 @@ If you found this repo by searching for `A5 01 01 21`, that is why it exists.
 | **[`PROTOCOL.md`](PROTOCOL.md)** | The complete wire format: framing, message types, the ACK handshake, record encoding, and the full field map with units |
 | **[`METHOD.md`](METHOD.md)** | How it was decoded, what the dead ends were, and the analyser settings that actually work. Read this before decoding a different unit |
 | **[`esphome/aciq-listen.yaml`](esphome/aciq-listen.yaml)** | The listener. Two receive-only taps, no transmit pin connected |
-| **[`tools/`](tools/) ** | Pure-python decoders for Kingst LA1010 CSV and binary exports. No numpy, no dependencies |
+| **[`tools/`](tools/)** | Pure-python decoders for Kingst LA1010 CSV and binary exports. No numpy, no dependencies |
 
 ## What it gives you
 
@@ -81,19 +81,30 @@ Live Home Assistant sensors, decoded from the appliance's own reporting:
 | Entity | Source | Notes |
 |---|---|---|
 | Room Temperature | field `0x03` | Emitted **unprompted every ~60 s** — this is what makes a real climate entity possible |
-| Setpoint | trailing byte | °F as the remote displays it |
+| Setpoint | `02 27` param | °F as the remote displays it. The unit thinks in **centi-°C** |
 | Power | field `0x01` | |
 | Mode | field `0x12` | Named + raw; see [mode values](#mode-values--mapped-and-verified) |
 | Fan Speed | field `0x05` | 1–7, and **0 = auto** |
 | Fan Percent | field `0x72` | 1 / 25 / 40 / 55 / 70 / 85 / 100 |
+| Fan Auto | field `0x73` | |
+| Vertical Louver | field `0x11` | Named positions — 3 sweep + 5 fixed. See [Louvers](PROTOCOL.md#louvers) |
+| Horizontal Louver | field `0x0E` | Named positions — 4 sweep + 5 fixed |
 | Indoor Coil Temperature | field `0x5C` | Evaporator; 10–13 °C while cooling |
 | Outdoor Temperature | field `0x60` | Ambient air, confirmed under compressor load |
 | Compressor Target | field `0xC0` | Commanded speed, % |
 | Compressor Actual | field `0x65` | Ramps to meet the target, % |
-| Power Usage | field `0x64` | Watts; corroborated by the app's own power tracker |
+| Power Usage | field `0x64` | Watts, quantised to 10. **Updates only ~every 12 min** — see [Input power](PROTOCOL.md#input-power) |
+| Eco Mode | field `0x13` | |
+| Sleep Mode | field `0x22` | Named + raw — off / standard / the aged / child |
+| Display Light | field `0x1E` | The indoor unit's LED display |
+| Beep · Health · Drying | `0x25` `0x15` `0x27` | |
+| Generator Mode | field `0x2D` | off / LV1 / LV2 / LV3. Only LV1 actually limits |
+| Power Limit | field `0x38` | Engaged / released, while the limiter bites |
+| Capability List | field `0x39` | Length-prefixed, and **it changes at runtime** |
 | Module WiFi Signal | `02 64` param | dBm, reported by the module itself |
-| Frames Decoded / Rejected | — | Health check. Rejected should stay at zero |
-| Last Frame / Unknown Fields | — | The mapping queue for anything not yet identified |
+| Frames Decoded / Rejected / CRC Failures | — | Health. Rejected and CRC failures should stay at zero |
+| RX Bytes AC / Module | — | Raw bytes per tap, counted **before** framing. See [gotcha 5](METHOD.md#5-logging-every-frame-at-info--it-silently-wedges-the-uart) |
+| Last Frame · Last Unmapped · Unknown Fields | — | The mapping queue for anything not yet identified |
 
 **The AC reports state on its own.** It does not need to be polled. That single
 property is why a read-only node is useful rather than a stepping stone — no
@@ -112,9 +123,9 @@ when the failure mode involves a ladder and a teardown.
 It ended as the design, for a better reason: **the stock WiFi dongle stays
 plugged in and keeps working.** The app still functions, including the
 diagnostics it exposes that the bus does not, and the appliance is entirely
-unmodified. Meanwhile Home Assistant gets sixteen local sensors the dongle never
-surfaces — coil temperature, compressor commanded vs actual, live input power,
-outdoor air.
+unmodified. Meanwhile Home Assistant gets thirty-odd local entities the dongle
+never surfaces — coil temperature, compressor commanded vs actual, input power,
+outdoor air, louver positions, and the feature flags.
 
 **The tradeoff is real and worth stating plainly.** Black is the module's
 transmit output. An ESP32 driving it too puts two push-pull outputs on one net,
@@ -192,8 +203,22 @@ Notes that cost time:
 5. Adopt the device in Home Assistant.
 6. Watch **Frames Decoded** climb and **Frames Rejected** stay at zero.
 
-If frames never arrive, check the shifter rails first. It is almost always the
-shifter rails.
+**If frames never arrive — or arrive and then stop — read `RX Bytes AC` and
+`RX Bytes Module` before touching the wiring.** They count raw bytes *before*
+any framing, so they separate faults that otherwise look identical:
+
+| | |
+|---|---|
+| Bytes rising, frames flat | framing or CRC — the wiring is fine |
+| Bytes flat on **one** tap | that tap's wire |
+| Bytes flat on **both** | shared supply/ground, or the loop is stalling |
+
+An earlier version of this file said "it is almost always the shifter rails."
+That advice cost an evening. The tap on this build went deaf repeatedly and the
+cause was **logging every frame at INFO inside the read loop**, which starved
+the UARTs — not the shifter, not the buffer size. See
+[gotcha 5](METHOD.md#5-logging-every-frame-at-info--it-silently-wedges-the-uart)
+before suspecting hardware.
 
 ## Mode values — mapped and verified
 
@@ -241,13 +266,29 @@ What remains is deliberate:
   appliance whose harness has to be cut to tap, and the failure mode for a bad
   frame involves a ladder and a teardown. Everything needed to transmit is in
   [`PROTOCOL.md`](PROTOCOL.md); connecting it is a decision, not a discovery.
-- **`0x3D`** cycles 0/1/2 in clock frames with no observed trigger. Unidentified
-  and low-value.
+- **A handful of ids remain unidentified** — `0x17`, `0x35`, `0x47`, `0x48`,
+  `0x5E`, `0x74`, `0xA4`, `0xC9`, and the wide `0x95`, `0xBD`–`0xBF`. **None of
+  them responds to any user-facing control**: a sweep of all 17 louver buttons,
+  all four generator levels, Turbo, Mute, I Feel and I Set surfaced only two new
+  ids. They are most likely diagnostics or configuration, so pressing buttons is
+  not the way to crack them.
+- **`0x3D`** appears in the "not yet identified" table but **has never actually
+  been observed** on this unit.
 - **A blower-outlet thermistor** may exist but has never appeared on the bus.
 
 ## Roadmap
 
-**Map Sleep and Timer**, the two app functions still unidentified.
+**Map TIMER**, the last remote button that has not been identified. Sleep is
+done — `0x22`, four named values.
+
+**Establish whether I FEEL does anything on this unit.** It is a generic
+multi-model remote, and the manual notes that buttons for functions the indoor
+unit lacks simply have no effect. Two attempts produced nothing, but both were
+invalidated by the listener stalling mid-test, so this is genuinely untested
+rather than negative.
+
+**Work out what LV2 and LV3 do.** Only LV1 engages the power limiter, at both
+loads tested.
 
 **Transmit and a real climate entity** are fully specified but deliberately not
 built here — see [why](#why-listen-only-is-the-final-design-not-a-stage). If you
@@ -261,12 +302,15 @@ not °F).
 README.md                    this file
 PROTOCOL.md                  wire format and field map
 METHOD.md                    how it was decoded, and the dead ends
+CHANGELOG.md                 what changed, and which claims were corrected
 esphome/aciq-listen.yaml     the listener
-CLAUDE.md                    conventions and evidence standards for this repo
+captures/reference-frames.txt  annotated real frames, one per message type
 tools/crc.py                 checksum: verify, compute, apply
 tools/decode_csv.py          Kingst LA1010 CSV -> frames
 tools/decode_bin.py          Kingst LA1010 binary -> frames
 tools/README.md              analyser settings that work
+CLAUDE.md                    conventions and evidence standards for this repo
+LICENSE                      MIT
 ```
 
 ## Hardware this was built on
