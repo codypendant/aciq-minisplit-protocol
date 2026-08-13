@@ -22,7 +22,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOCS = ["README.md", "PROTOCOL.md", "METHOD.md", "CHANGELOG.md", "CLAUDE.md",
         "tools/README.md"]
-CONFIG = "esphome/aciq-listen.yaml"
+CONFIG = "esphome/aciq-k18w.yaml"
 
 # Claims that were retracted. If one reappears as a live assertion, it is
 # almost certainly prose that was never updated. Add to this list whenever

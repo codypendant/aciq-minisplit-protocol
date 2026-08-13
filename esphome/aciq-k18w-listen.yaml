@@ -1,0 +1,1469 @@
+# =============================================================================
+# ACiQ MINI SPLIT (K18W) -- LISTEN-ONLY PROTOCOL DECODER
+#
+# Taps the AC's transmit line and decodes its state broadcasts. It NEVER
+# transmits. The stock TCL WBR1 dongle stays plugged in and keeps working
+# exactly as it does today -- this board is a bystander on one wire.
+#
+# Purpose: map the remaining protocol fields (mode, swing, room temp) from a
+# node that runs for days, instead of 25-second logic-analyser captures. Once
+# the field map is complete, control gets added to a parser that is already
+# known to be correct.
+#
+# Written 2026-08-09 from four LA1010 captures. Protocol notes below are
+# MEASURED, not inferred from prior art -- see the README for
+# why the published TCL/Midea/Tuya components do not apply to this unit.
+#
+# ---------------------------------------------------------------------------
+# *** WIRING -- THREE WIRES, AND GPIO17 MUST STAY DISCONNECTED ***
+#
+#   harness WHITE (GND) ------------------------- ESP32 GND
+#   harness RED   (AC transmits)  -- shifter ----- ESP32 GPIO16   (RX only)
+#   harness BLACK (module transmits) -- shifter -- ESP32 GPIO4    (RX only)
+#
+#                                   GPIO17 ------- *** NOTHING ***
+#
+# BOTH taps are receive-only. Leaving the transmit pin unconnected is what
+# makes this safe: there is no bus contention to get wrong, and no malformed
+# frame can reach the mainboard. Do not "temporarily" wire GPIO17 to see what
+# happens.
+#
+# BLACK is tapped because it is the direction an ESP32 replacement will one day
+# have to SPEAK. With the phone app paired, driving the app generates real
+# module->AC commands on that line -- which is the cheapest possible way to
+# learn the command format without transmitting anything ourselves.
+# Listening to a line we will later drive is still listening.
+#
+# RED is the AC's transmit line -- PROVEN in both directions:
+#   module powered alone, no AC -> BLACK active, RED idle
+#   AC powered alone, no module -> RED active, BLACK idle
+#
+# *** CN-16 IS 5 V LOGIC. *** Measured with a meter. ESP32 pins are not 5 V
+# tolerant. Use the 4-channel shifter (HV from harness YELLOW +5V, LV to 3V3).
+# Receive-only would also tolerate a plain 10k/20k divider, but the shifter is
+# already on hand, so use it.
+#
+# *** POWER THIS BOARD FROM USB for the listening phase. *** Do not tap CN-16
+# +5V yet, and NEVER connect USB and CN-16 5 V at the same time -- back-feeding
+# destroys boards and USB ports.
+#
+# Splicing a tap into a line that must ALSO continue to the dongle needs
+# 3-conductor lever nuts: **WAGO 221-413**, not the 2-conductor 221-412.
+#
+# ---------------------------------------------------------------------------
+# MEASURED PROTOCOL -- 115200 8N1, 0xA5 FRAMING
+#
+# NOT TCL's 0xBB @ 9600 8E1. NOT Midea's 0xAA. NOT Tuya's 55 AA. The module is
+# Tuya silicon (WBR1 / RTL8720CF) running TCL Home firmware, and the wire
+# protocol matches nothing published. 9600 is ruled out empirically: 2347 of
+# 2347 pulses match a 115200 bit time, 0 of 2347 match 9600.
+#
+#   [0]     A5          header
+#   [1]     01          constant
+#   [2]     00 / 01     link flag
+#   [3]     TYPE        0x21 = report      0x23 = acknowledgment
+#   [4]     COUNTER     increments per message
+#   [5:6]   00 00
+#   [7]     LENGTH      total frame length, INCLUDING these 8 header bytes
+#   [8:9]   CHECK       CRC-16/XMODEM, big-endian -- SOLVED, see below
+#   [10:]   payload     starts `0C 0C 00`, then <field> <value> 00, then data
+#
+# Reference frames (0 framing errors, all length bytes valid):
+#
+#   AC  A5 01 01 21 99 00 00 18 47 A0 0C 0C 00 02 00 00 0A 8C 02 27 00 00 00 51
+#   MOD A5 01 01 23 00 99 00 0C 24 4E 80 0C          <- ACK, echoes counter 99
+#   AC  A5 01 01 21 9B 00 00 15 F5 7D 0C 0C 00 05 03 00 72 00 00 00 28
+#
+# FIELDS CONFIRMED against six known button presses:
+#   * SETPOINT -- last byte, in DEGREES FAHRENHEIT, on frames whose final six
+#     bytes are `02 27 00 00 00 <sp>`. Observed 81/80/79/80 across
+#     up/down/down/up from a starting setpoint of 80 F.
+#   * FAN SPEED -- payload field id 0x05 (frame index 13), value at index 14.
+#     Stepped 3 -> 4 on two consecutive fan presses.
+#
+# *** CHECKSUM SOLVED 2026-08-10 *** and now verified on every frame.
+#
+#   CRC-16/XMODEM: poly 0x1021, init 0x0000, MSB-first, no final XOR
+#   region: the whole frame with bytes 8-9 *** REMOVED, not zeroed ***
+#
+# Validated on 105 frames -- every length from 12 to 90 bytes, both directions,
+# all five payload types -- with zero failures.
+#
+# THE REMOVE-vs-ZERO DISTINCTION IS THE WHOLE PUZZLE. Two days of attempts
+# zeroed the check field, which leaves two extra bytes in the shift register.
+# That makes the counter byte appear to fit CRC-1021 at a tail two SHORTER than
+# its position, while the payload never fits at all -- a maddening combination
+# that looks like "the counter is protected but the payload is folded in some
+# other way". It is not. It is one ordinary CRC over a region with a hole in it.
+#
+# HOW IT WAS FOUND, because guessing CRC parameters never would have: solve the
+# check field as a GF(2) linear system over the individual bits of the four
+# bytes that vary across 79 report frames. The solution reproduces every frame,
+# and its per-bit contributions are visibly a 0x1021 shift register. Comparing
+# each byte's EFFECTIVE tail against its POSITIONAL tail then showed a constant
+# 2-byte discrepancy for bytes before the check field and none after it.
+#
+# ---------------------------------------------------------------------------
+# HOW TO USE IT TO MAP THE REMAINING FIELDS
+#
+# Frames are logged at DEBUG, NOT INFO. That is deliberate and it is the fix
+# for the RX stalls -- logging every frame at INFO from inside the read loop
+# wedged both UARTs within 5-38 min. See the ESP_LOGD comment in the read loop.
+#
+# So for day-to-day running, read the frames from the `Last Frame` and
+# `Last Unmapped Frame` entities in Home Assistant, not from the log.
+#
+# WHEN ACTIVELY MAPPING FIELDS, set `logger: level: DEBUG` to get the per-frame
+# stream back -- then press ONE button and note what changed. Expect the stalls
+# to return while DEBUG is on, and put it back to INFO afterwards. The watchdog
+# will keep recovering the node in the meantime.
+#
+# `Last Unmapped Frame` holds the most recent frame this config could not
+# interpret -- that is the queue of work. When mode or swing shows up there,
+# the changing byte is the field.
+#
+# METHOD NOTE, learned the hard way on the ceiling fans: field boundaries
+# guessed from ONE capture per button have been wrong repeatedly. Press the
+# SAME button six times, ~5 s apart. Whatever increments is the value;
+# whatever stays constant is the field id.
+# =============================================================================
+
+substitutions:
+  device_name: aciq-listen
+  humanly_name: "Garage Mini Split Listener"
+
+  # RED = the AC's transmit line, through the level shifter.
+  # GPIO16 is the ESP32's native UART2 RX, so this maps to real UART hardware.
+  uart_rx: GPIO16
+
+  # BLACK = the module's transmit line. Receive-only, second hardware UART.
+  # NOT GPIO9/10 (UART1's defaults) -- those are wired to the flash chip.
+  uart_rx_mod: GPIO4
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${humanly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+    # CONFIRMED from this board's own boot log 2026-08-09:
+    # "ESP32 Chip: ESP32 rev3.1, 2 core(s)". ESPHome itself then recommended
+    # both of these. Do NOT copy to another board without re-checking -- a
+    # "3.1" floor will not boot on older silicon.
+    advanced:
+      minimum_chip_revision: "3.1"
+      sram1_as_iram: true
+
+# Left on UART0 deliberately: the first flash is over USB and the boot log is
+# how the chip revision above gets checked. The AC tap uses UART2 (GPIO16).
+logger:
+  level: INFO
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # The head unit is ~4 ft from the garage ceiling AP, so signal is a non-issue.
+  ap:
+    ssid: "${device_name} fallback"
+    password: !secret ap_fallback_password
+
+captive_portal:
+
+# -----------------------------------------------------------------------------
+# THE TAP. rx_pin only -- no tx_pin key exists in this block on purpose.
+# -----------------------------------------------------------------------------
+uart:
+  - id: ac_bus
+    rx_pin: ${uart_rx}
+    baud_rate: 115200
+    data_bits: 8
+    parity: NONE
+    stop_bits: 1
+    # A 90-byte frame is the longest seen. Polling every 10 ms can accumulate
+    # at most ~115 bytes at this rate, so 1024 has generous headroom.
+    #
+    # NOTE FOR ANYONE DEBUGGING RX STALLS HERE: this size is not the problem
+    # and enlarging it will not help. The 2026-08-10 stalls came from the read
+    # loop falling behind because it logged every frame at INFO -- 1024 bytes
+    # is ~89 ms of headroom at 115200, which is plenty right up until the loop
+    # blocks for longer than that. See the ESP_LOGD comment in the read loop.
+    rx_buffer_size: 1024
+
+  - id: mod_bus
+    rx_pin: ${uart_rx_mod}
+    baud_rate: 115200
+    data_bits: 8
+    parity: NONE
+    stop_bits: 1
+    rx_buffer_size: 1024
+
+globals:
+  - id: rx_buf
+    type: std::vector<uint8_t>
+    restore_value: no
+  - id: rx_buf_mod
+    type: std::vector<uint8_t>
+    restore_value: no
+  - id: frame_count
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: reject_count
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: crc_fail_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  # Millis of the last successfully framed message, either channel. Drives the
+  # deaf-tap watchdog below. 0 means "nothing yet since boot".
+  - id: last_frame_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  # Consecutive watchdog reboots. MUST survive a reboot, otherwise the cap it
+  # enforces resets every time and cannot cap anything. Cleared the moment a
+  # frame arrives, so it only counts *unsuccessful* recovery attempts.
+  - id: wd_reboots
+    type: uint8_t
+    restore_value: yes
+    initial_value: '0'
+
+  # Raw bytes seen on each tap, counted before any framing. See the comment at
+  # the read loop for why these exist.
+  - id: rx_bytes_ac
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: rx_bytes_mod
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  # Millis of the last RAW BYTE from either tap. This, not last_frame_ms, is
+  # what the watchdog should trigger on -- see the watchdog comment.
+  - id: last_byte_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+sensor:
+  - platform: template
+    name: "Setpoint"
+    id: ac_setpoint
+    unit_of_measurement: "°F"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    name: "Fan Speed"
+    id: ac_fan_speed
+    icon: mdi:fan
+    accuracy_decimals: 0
+    update_interval: never
+
+  # Raw 0-4. Which value is auto/cool/dry/fan/heat is NOT yet established --
+  # the capture proved there are exactly five, not which is which. Map it to
+  # names only after watching the app while each mode is selected.
+  - platform: template
+    name: "Mode (raw)"
+    id: ac_mode_raw
+    icon: mdi:hvac
+    accuracy_decimals: 0
+    update_interval: never
+
+  # Field 0x03, centi-degrees Celsius on the wire, published in F. The AC
+  # reports this unprompted roughly once a minute -- it is what makes a real
+  # climate entity possible rather than a write-only remote.
+  - platform: template
+    name: "Room Temperature"
+    id: ac_room_temp
+    unit_of_measurement: "°F"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+
+  # Field 0x60. Cross-checked against the ducted unit's outdoor sensor.
+  - platform: template
+    name: "Outdoor Temperature"
+    id: ac_outdoor_temp
+    unit_of_measurement: "°F"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+
+  # Field 0x65 -- what the compressor is ACTUALLY doing. Ramps to meet the
+  # target; the gap between the two is the machine spooling up.
+  - platform: template
+    name: "Compressor Actual"
+    id: ac_compressor_actual
+    unit_of_measurement: "%"
+    icon: mdi:air-conditioner
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: never
+
+  # The module's own WiFi signal, from the `02 64` heartbeat parameter.
+  - platform: template
+    name: "Module WiFi Signal"
+    id: ac_module_rssi
+    unit_of_measurement: "dBm"
+    device_class: signal_strength
+    state_class: measurement
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: never
+
+  # Field 0x64. The app exposes a power-usage tracker, so the unit reports this
+  # somewhere; 0x64 is the only field shaped like watts.
+  - platform: template
+    name: "Power Usage"
+    id: ac_power_w
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: never
+
+  # Field 0xC0 -- what the unit is ASKING the compressor to do.
+  - platform: template
+    name: "Compressor Target"
+    id: ac_compressor
+    unit_of_measurement: "%"
+    icon: mdi:air-conditioner
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: never
+
+  # Field 0x5C. Previously mislabelled "Blower RPM" -- the values looked like a
+  # plausible fan speed until it kept climbing after shutdown instead of
+  # dropping to zero.
+  - platform: template
+    name: "Indoor Coil Temperature"
+    id: ac_coil_temp
+    unit_of_measurement: "°F"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+
+  - platform: template
+    name: "Fan Percent"
+    id: ac_fan_pct
+    unit_of_measurement: "%"
+    icon: mdi:fan
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    name: "Sleep (raw)"
+    id: ac_sleep_raw
+    icon: mdi:weather-night
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    name: "Generator Mode (raw)"
+    id: ac_generator_raw
+    icon: mdi:engine
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: never
+
+  # Raw byte counters, published on a timer rather than per byte -- publishing
+  # per byte would flood the recorder at 115200 baud. 30 s matches the watchdog
+  # so a deaf period lines up in history with whichever counter stopped.
+  - platform: template
+    name: "RX Bytes AC"
+    id: ac_rx_bytes_ac
+    icon: mdi:swap-vertical
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 30s
+    lambda: 'return (float) id(rx_bytes_ac);'
+
+  - platform: template
+    name: "RX Bytes Module"
+    id: ac_rx_bytes_mod
+    icon: mdi:swap-vertical
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 30s
+    lambda: 'return (float) id(rx_bytes_mod);'
+
+  - platform: template
+    name: "Frames Decoded"
+    id: ac_frames
+    icon: mdi:counter
+    state_class: total_increasing
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    name: "Frames Rejected"
+    id: ac_rejects
+    icon: mdi:alert-outline
+    state_class: total_increasing
+    accuracy_decimals: 0
+    update_interval: never
+
+  # Frames whose CRC-16/XMODEM did not match. Distinct from "Rejected", which
+  # counts implausible length bytes. This should stay at zero; anything else
+  # means real corruption on the tap rather than a decoder bug.
+  - platform: template
+    name: "CRC Failures"
+    id: ac_crc_fails
+    icon: mdi:alert-outline
+    state_class: total_increasing
+    accuracy_decimals: 0
+    update_interval: never
+
+binary_sensor:
+  # Field 0x13. Command is `13=01`; the AC echoes `DF 01 00 13 01`.
+  - platform: template
+    name: "Eco Mode"
+    id: ac_eco
+    icon: mdi:leaf
+
+  # App "Light" -- the indoor unit's display LED.
+  - platform: template
+    name: "Display Light"
+    id: ac_light
+    icon: mdi:led-on
+
+  # App "Beep" -- command confirmation tone.
+  - platform: template
+    name: "Beep"
+    id: ac_beep
+    icon: mdi:volume-high
+
+  # App "Health" -- ionizer / purification.
+  - platform: template
+    name: "Health"
+    id: ac_health
+    icon: mdi:leaf-circle
+
+  # App "Drying" -- anti-mildew coil dry after shutdown.
+  - platform: template
+    name: "Drying"
+    id: ac_drying
+    icon: mdi:water-off
+
+  # Field 0x73. Set together with fan speed 0.
+  - platform: template
+    name: "Fan Auto"
+    id: ac_fan_auto
+    icon: mdi:fan-auto
+  # Field 0x01. The AC emits a full 66/90/72-byte state dump immediately after
+  # each power-ON -- useful later, as it is exactly when a freshly booted
+  # ESP32 would otherwise have to ask for state.
+  - platform: template
+    name: "Power"
+    id: ac_power
+    device_class: power
+
+text_sensor:
+  - platform: template
+    name: "Last Frame"
+    id: ac_last_frame
+    icon: mdi:code-array
+    update_interval: never
+
+  # The mapping queue: anything this config could not interpret lands here.
+  - platform: template
+    name: "Last Unmapped Frame"
+    id: ac_last_unmapped
+    icon: mdi:help-box
+    update_interval: never
+
+  # Unmapped WIDE (32-bit) fields, shown raw and -- when the value falls in a
+  # plausible thermistor range -- also as degrees F on the assumption of
+  # centi-Celsius, the encoding every confirmed temperature on this bus uses.
+  #
+  # This exists to catch the INDOOR COIL thermistor. A coil has the most
+  # violent signature on the bus: it plunges from room temperature to roughly
+  # 5-10 C within a couple of minutes of the compressor engaging, then climbs
+  # straight back when it stops. Watch this through one cooling cycle from a
+  # warm start and it identifies itself.
+  - platform: template
+    name: "Wide Fields"
+    id: ac_wide_fields
+    icon: mdi:thermometer-lines
+    update_interval: never
+
+  # Field 0x39 -- a length-prefixed list, constant across every state dump.
+  # Most likely the set of parameters this unit supports. Exposed raw because
+  # what it enumerates is not yet confirmed.
+  - platform: template
+    name: "Capability List"
+    id: ac_caps
+    icon: mdi:format-list-bulleted
+    entity_category: diagnostic
+    update_interval: never
+
+  # Field 0x22 rendered as a name. All four values confirmed from command
+  # frames; the raw value stays published because a name can be wrong and a
+  # number cannot.
+  - platform: template
+    name: "Sleep Mode"
+    id: ac_sleep_name
+    icon: mdi:weather-night
+    update_interval: never
+
+  # Field 0x12 rendered as a name. The raw integer is kept alongside it
+  # deliberately: the mapping is verified, but the raw value cannot be wrong.
+  - platform: template
+    name: "Mode"
+    id: ac_mode_name
+    icon: mdi:hvac
+    update_interval: never
+
+  # Louver position, both axes. Field 0x11 is the VERTICAL louver and 0x0E is
+  # the HORIZONTAL one -- note that is the opposite of what this file assumed
+  # until 2026-08-10. Established by pressing every button in the app's
+  # "Precision Air Flow" screen left-to-right and matching the captured values
+  # against the app's own labels: the "Up-Down Flow Control" tab has 8 buttons
+  # and drove 0x11, the "Left-Right Flow Control" tab has 9 and drove 0x0E.
+  - platform: template
+    name: "Vertical Louver"
+    id: ac_louver_v
+    icon: mdi:arrow-up-down
+    update_interval: never
+
+  - platform: template
+    name: "Horizontal Louver"
+    id: ac_louver_h
+    icon: mdi:arrow-left-right
+    update_interval: never
+
+  # Field 0x2D rendered as a name. Raw kept alongside, same reasoning as Mode.
+  - platform: template
+    name: "Generator Mode"
+    id: ac_generator
+    icon: mdi:engine
+    update_interval: never
+
+  # Field 0x38 -- only present while the generator limiter is actually biting.
+  - platform: template
+    name: "Power Limit"
+    id: ac_power_limit
+    icon: mdi:speedometer-slow
+    update_interval: never
+
+  # Commands seen on the module's transmit line (0A 0A payloads) -- what the
+  # app or remote ASKED for, as opposed to what the AC reports.
+  - platform: template
+    name: "Last Command"
+    id: ac_last_command
+    icon: mdi:send
+    update_interval: never
+
+  # Decoded records whose field id has no meaning assigned yet, as `id=val`
+  # pairs. POWER and ROOM TEMPERATURE are the two that still matter -- watch
+  # this while toggling power, and watch it drift over hours for the sensor.
+  - platform: template
+    name: "Unknown Fields"
+    id: ac_unknown_fields
+    icon: mdi:tag-search
+    update_interval: never
+
+interval:
+  - interval: 10ms
+    then:
+      - lambda: |-
+          static const char *const TAG = "aciq";
+          static std::string prev_frame;
+          static std::string prev_unmapped;
+          static std::string prev_fields;
+          static std::string prev_wide;
+          static std::string prev_cmd;
+          static std::string prev_caps;
+
+          // Two receive-only taps. ch 0 = RED (AC), ch 1 = BLACK (module).
+          // Indexed rather than pointer-typed so this stays plain ESPHome API.
+          for (int ch = 0; ch < 2; ch++) {
+          auto &v = (ch == 0) ? id(rx_buf) : id(rx_buf_mod);
+          const char *dir = (ch == 0) ? "AC " : "MOD";
+
+          while (ch == 0 ? id(ac_bus).available() : id(mod_bus).available()) {
+            uint8_t b;
+            bool got = (ch == 0) ? id(ac_bus).read_byte(&b)
+                                 : id(mod_bus).read_byte(&b);
+            if (!got) break;
+
+            // *** RAW BYTE COUNTERS, PER CHANNEL -- diagnostic, not decoding.
+            // Counted BEFORE any framing logic, so they tick even for bytes
+            // that never become a frame.
+            //
+            // These exist because the 2026-08-10 outages could not be
+            // diagnosed from frame counts alone. Two hardware theories were
+            // proposed and both were wrong, because "no frames" is consistent
+            // with four different faults. Next time these separate them:
+            //
+            //   bytes rising, frames flat        -> framing/CRC, not wiring
+            //   bytes flat on ONE channel only   -> that channel's wire
+            //   bytes flat on BOTH               -> shared supply/ground,
+            //                                       or the source really did
+            //                                       stop talking
+            //
+            // Cheap to keep and it turns the next 20-minute intermittent into
+            // one glance instead of another evening of theories.
+            if (ch == 0) id(rx_bytes_ac)++; else id(rx_bytes_mod)++;
+            id(last_byte_ms) = millis();
+
+            // Resynchronise on the header rather than trusting byte alignment.
+            if (v.empty() && b != 0xA5) continue;
+            v.push_back(b);
+
+            // Length arrives at index 7. Reject implausible values immediately
+            // so a corrupt byte costs one frame, not the whole stream.
+            if (v.size() == 8) {
+              uint8_t len = v[7];
+              if (len < 8 || len > 128) {
+                id(reject_count)++;
+                id(ac_rejects).publish_state(id(reject_count));
+                v.clear();
+                continue;
+              }
+            }
+
+            if (v.size() < 8 || v.size() != (size_t) v[7]) continue;
+
+            // ---- CHECKSUM: CRC-16/XMODEM ----
+            // poly 0x1021, init 0x0000, MSB-first, no final XOR.
+            // The region is the whole frame with bytes 8-9 (the check field)
+            // *** REMOVED, not zeroed ***. That distinction is the entire
+            // puzzle: zeroing them leaves two extra bytes in the shift
+            // register, which makes the counter appear to fit at a tail two
+            // shorter than its position while the payload never fits at all.
+            // Verified on 105 frames, every length 12-90, both directions.
+            {
+              uint16_t c = 0x0000;
+              for (size_t k = 0; k < v.size(); k++) {
+                if (k == 8 || k == 9) continue;      // skip the check field
+                c ^= (uint16_t) v[k] << 8;
+                for (int i = 0; i < 8; i++)
+                  c = (c & 0x8000) ? (uint16_t)((c << 1) ^ 0x1021)
+                                   : (uint16_t)(c << 1);
+              }
+              uint16_t want = ((uint16_t) v[8] << 8) | v[9];
+              if (c != want) {
+                ESP_LOGW(TAG, "%s CRC BAD  want %04X got %04X", dir, want, c);
+                id(crc_fail_count)++;
+                id(ac_crc_fails).publish_state(id(crc_fail_count));
+                v.clear();
+                continue;
+              }
+            }
+
+            // ---- complete frame ----
+            std::string hex;
+            char tmp[4];
+            for (uint8_t x : v) { sprintf(tmp, "%02X ", x); hex += tmp; }
+            if (!hex.empty()) hex.pop_back();
+
+            // *** DEBUG, NOT INFO. THIS ONE LINE WAS THE BUG. ***
+            //
+            // As ESP_LOGI this fired on EVERY frame with a string up to ~270
+            // chars, written to UART0 AND pushed to every connected API log
+            // client -- from inside the lambda that must drain two UARTs every
+            // 10 ms. The loop fell behind, both RX buffers overran, and the
+            // ESP32 driver stopped delivering. Because both channels are
+            // serviced by this same loop they died TOGETHER, which is exactly
+            // what made it look like a shared-hardware fault and cost two
+            // wrong diagnoses (the level shifter, then a UART latch-up).
+            //
+            // Confirmed 2026-08-11 by changing only this call:
+            //
+            //   before   deaf after 5, 14, 20, 38 min
+            //   after    9.4 h continuous, 4221 frames, 0 rejects, 0 CRC fails
+            //
+            // *** rx_buffer_size was ALREADY 1024. The buffer was never the
+            // problem -- the loop was. Do not "fix" this by enlarging the
+            // buffer. ***
+            //
+            // Nothing is lost day to day: the `Last Frame` entity carries the
+            // same hex into Home Assistant. WHEN ACTIVELY MAPPING FIELDS, set
+            // `logger: level: DEBUG` to get the full per-frame stream back --
+            // and expect the stalls to return while it is on.
+            ESP_LOGD(TAG, "%s %s [%2u] %s", dir,
+                     v[3] == 0x21 ? "REPORT" : (v[3] == 0x23 ? "ACK   " : "TYPE? "),
+                     (unsigned) v.size(), hex.c_str());
+
+            id(frame_count)++;
+            id(ac_frames).publish_state(id(frame_count));
+            id(last_frame_ms) = millis();   // feeds the deaf-tap watchdog
+
+            // A frame proves recovery, so clear the watchdog's attempt counter.
+            // WITHOUT THIS the cap is permanent, not per-incident: wd_reboots
+            // has restore_value: yes, so after three watchdog restarts in the
+            // device's whole life it would never restart again. Guarded on
+            // != 0 because restore_value writes to flash, and this line runs
+            // on every single frame.
+            if (id(wd_reboots) != 0) id(wd_reboots) = 0;
+
+            // Republishing an identical string on every broadcast would churn
+            // the recorder for no information, so only publish on change.
+            if (hex != prev_frame) {
+              prev_frame = hex;
+              id(ac_last_frame).publish_state(hex);
+            }
+
+            size_t n = v.size();
+            bool mapped = false;
+
+            // ACKs carry no state -- they only echo the counter.
+            if (v[3] == 0x23) mapped = true;
+
+            // ---- wide fields: <id> 00 00 <hi> <lo> ----
+            // Record widths are SCHEMA-DEPENDENT, not uniform. Most fields are
+            // one byte (`<id> <val> 00`), but some carry a 32-bit value
+            // (`<id> 00 00 <hi> <lo> 00`). The generic 2-byte walk below
+            // mislabels those -- it reported room temperature as a phantom
+            // "0A=D2" field. Scan for the wide form explicitly first.
+            // ---- COMMAND frames: payload header 0A 0A ----
+            // Same frame type and same TLV records as a report; only the
+            // payload header distinguishes them.
+            //   0C 0C = state report (the AC telling us what IS)
+            //   0A 0A = command      (the module asking for a CHANGE)
+            //   0D 0D = clock
+            // Commands are requests, so nothing here publishes state -- the
+            // AC's own report a moment later is the authority.
+            if (v[3] == 0x21 && n >= 15 && v[10] == 0x0A && v[11] == 0x0A) {
+              // Commands carry the SAME variable-width records as reports, so
+              // this must skip wide fields exactly as the report walk does.
+              // A flat 3-byte stride once rendered the setpoint record
+              // `02 00 00 0A 8C` as "02=00 0A=8C" -- a real field with the
+              // wrong value, plus a phantom field that does not exist.
+              std::string cmd;
+              size_t i = 13;
+              while (i + 1 < n) {
+                uint8_t fid = v[i];
+                bool wide = false;
+                switch (fid) {
+                  case 0x02: case 0x03: case 0x5C: case 0x60:
+                  case 0x64: case 0x65: case 0x72: case 0xC0:
+                  case 0x95: case 0xBD: case 0xBE: case 0xBF:
+                               // Kept in step with the report walk below on
+                               // purpose. These four have only ever been seen
+                               // in reports, never commanded -- but if one ever
+                               // is, a mismatched width here would desynchronise
+                               // the whole command frame.
+                    wide = (i + 4 < n && v[i+1] == 0x00 && v[i+2] == 0x00);
+                    break;
+                  default: break;
+                }
+                char t[32];
+                if (wide) {
+                  sprintf(t, "%02X=%u ", fid,
+                          (unsigned) (((uint16_t) v[i+3] << 8) | v[i+4]));
+                  i += 6;
+                } else {
+                  sprintf(t, "%02X=%02X ", fid, v[i+1]);
+                  i += 3;
+                }
+                cmd += t;
+              }
+              if (!cmd.empty() && cmd != prev_cmd) {
+                prev_cmd = cmd;
+                id(ac_last_command).publish_state(cmd);
+              }
+              ESP_LOGI(TAG, "  COMMAND: %s", cmd.c_str());
+              mapped = true;
+            }
+
+            // WiFi RSSI. The module's heartbeat ACK carries an `02 64`
+            // parameter holding a signed 32-bit dBm value:
+            //   A5 01 00 23 ... 80 0C | 02 64 FF FF FF DB   = -37 dBm
+            // Note this is the `02` PARAMETER 0x64, a different namespace
+            // from the AC's field 0x64 (watts).
+            if (v[3] == 0x23 && n >= 18 && v[12] == 0x02 && v[13] == 0x64) {
+              int32_t dbm = ((int32_t) v[14] << 24) | ((int32_t) v[15] << 16) |
+                            ((int32_t) v[16] << 8)  |  (int32_t) v[17];
+              if (dbm < 0 && dbm > -120) {
+                id(ac_module_rssi).publish_state(dbm);
+                mapped = true;
+              }
+            }
+
+            // Clock request (`10 10`) and the `26 26` poll. Understood --
+            // the AC asks, the module answers with unix time. Nothing to
+            // publish, but they must not clutter the mapping queue.
+            if (n >= 12 && ((v[10] == 0x10 && v[11] == 0x10) ||
+                            (v[10] == 0x26 && v[11] == 0x26) ||
+                            (v[10] == 0x80 && v[11] == 0x10)))
+              mapped = true;
+
+            // Clock frames. Understood, nothing to publish -- but they must
+            // not sit in the mapping queue pretending to be undecoded work.
+            if (v[3] == 0x21 && n >= 12 && v[10] == 0x0D && v[11] == 0x0D)
+              mapped = true;
+
+            // Bare heartbeat: a 0C 0C payload carrying no records at all.
+            if (v[3] == 0x21 && n <= 13 && v[10] == 0x0C && v[11] == 0x0C)
+              mapped = true;
+
+            std::string wide;
+            if (v[3] == 0x21 && n >= 18 && v[10] == 0x0C && v[11] == 0x0C) {
+              // Step by 3, not 1. Every record is a multiple of three bytes
+              // (narrow = id/val/sep, wide = id/00/00/hi/lo/sep), so a stride
+              // of 3 stays on real boundaries. Scanning every offset matched
+              // `xx 00 00` mid-record and invented fields that do not exist --
+              // that is where "0C=3328(91.9F)" and "DF=51456" came from.
+              for (size_t i = 13; i + 4 < n; i += 3) {
+                if (v[i+1] != 0x00 || v[i+2] != 0x00) continue;
+                uint16_t val = ((uint16_t) v[i+3] << 8) | v[i+4];
+                // Anything wide we have not claimed gets surfaced with a
+                // centi-Celsius reading alongside, so a thermistor is obvious.
+                switch (v[i]) {
+                  // Every id we understand -- WIDE **and NARROW**. A narrow
+                  // field holding zero (`01 00 00 ...`) is byte-identical to
+                  // the start of a wide one, so power (0x01) was surfacing as
+                  // a phantom "01=512(41.2F)". Excluding only the wide ids was
+                  // not enough; the whole known set has to be excluded.
+                  case 0x00:                                    // misalignment
+                  case 0x01: case 0x05: case 0x0C: case 0x0D:   // narrow
+                  case 0x0E: case 0x11: case 0x12: case 0x13:
+                  case 0x73: case 0xDF:
+                  case 0x2D:                                    // generator mode
+                  case 0x38: case 0x39:                         // length-prefixed
+                  case 0x02: case 0x03: case 0x5C:              // wide
+                  case 0x60: case 0x64: case 0x65: case 0x72: case 0xC0:
+                  case 0x95: case 0xBD: case 0xBE: case 0xBF:   // wide, unidentified
+                               // -- reported by the main walk now, with their
+                               // true 16-bit value. Excluded here so they are
+                               // not ALSO surfaced with a bogus degF reading.
+                    break;                      // already understood
+                  default: {
+                    // Only surface values in a plausible thermistor band.
+                    // A narrow record holding zero is byte-identical to the
+                    // start of a wide field (`0C 00 00 0D 00 00` is really
+                    // 0C=0 then 0D=0, but reads as 0C=3328), so this scan
+                    // cannot be made exact -- it can only be made USEFUL.
+                    // The one remaining target is the blower-outlet sensor,
+                    // so anything outside 0-50 C is noise here.
+                    if (val >= 200 && val <= 5000) {
+                      char t[48];
+                      sprintf(t, "%02X=%u(%.1fF) ", v[i], val,
+                              val / 100.0f * 9.0f / 5.0f + 32.0f);
+                      wide += t;
+                    }
+                    break;
+                  }
+                }
+                switch (v[i]) {
+                  case 0x03:   // ROOM TEMPERATURE, centi-degrees Celsius.
+                               // Reported unprompted every ~60 s.
+                    if (val >= 500 && val <= 5000) {
+                      id(ac_room_temp).publish_state(val / 100.0f * 9.0f / 5.0f + 32.0f);
+                      mapped = true;
+                    }
+                    break;
+                  case 0x5C:   // INDOOR COIL TEMPERATURE, centi-degrees C.
+                               // NOT blower RPM -- that was a mislabel. 1000-
+                               // 1300 (10-13 C) while cooling is a textbook
+                               // evaporator coil, and after shutdown it climbed
+                               // 1500 -> 1700 -> 1900 -> 2100 -> 2300 -> 2600
+                               // and settled at exactly the room temperature
+                               // (0x03 also read 0x0A28). A fan goes to ZERO
+                               // when it stops; a coil warms to ambient.
+                    if (val >= 200 && val <= 6000) {
+                      id(ac_coil_temp).publish_state(val / 100.0f * 9.0f / 5.0f + 32.0f);
+                      mapped = true;
+                    }
+                    break;
+                  case 0x02:   // Setpoint in centi-C. The user-facing value
+                               // comes from the trailing degF byte below, which
+                               // is what the remote and app actually display.
+                    mapped = true;
+                    break;
+                  case 0x60:   // OUTDOOR TEMPERATURE, centi-degrees Celsius.
+                               // Cross-checked against the ducted unit's own
+                               // outdoor sensor: 3200 = 89.6 F against 92.3 F
+                               // measured elsewhere on the property.
+                               // Could still be outdoor COIL rather than air --
+                               // the discriminator is overnight behaviour. Air
+                               // falls steadily; a coil jumps with compressor
+                               // cycles.
+                    if (val >= 500 && val <= 6500) {
+                      id(ac_outdoor_temp).publish_state(val / 100.0f * 9.0f / 5.0f + 32.0f);
+                      mapped = true;
+                    }
+                    break;
+                  case 0x65:   // ACTUAL compressor speed, percent. Ramps up to
+                               // meet 0xC0. Observed 18 -> 37 -> 50 -> 64 -> 86
+                               // over ~45 s from a cold start while 0xC0 sat at
+                               // 86 the whole time, then both settled at 82.
+                    if (val <= 100) {
+                      id(ac_compressor_actual).publish_state(val);
+                      mapped = true;
+                    }
+                    break;
+                  case 0xC0:   // Compressor speed. Ran 30-82 while cooling and
+                               // went to EXACTLY 0 the moment power was
+                               // switched off.
+                               // SETTLED as COMMANDED (target) speed in PERCENT.
+                               // On a cold start it jumps straight to its value
+                               // while 0x65 ramps up to meet it -- target/actual.
+                               // Percent, not Hz: both cap near 86 and the app
+                               // exposes a 0-100% speed.
+                    if (val <= 200) {
+                      id(ac_compressor).publish_state(val);
+                      mapped = true;
+                    }
+                    break;
+                  case 0x64:   // INPUT POWER, watts. The app has a power-usage
+                               // tracker, which means the unit must report
+                               // power somewhere -- and this is the only field
+                               // shaped like it: 620-930 falling with load, and
+                               // exactly 0 when off (a coil thermistor would
+                               // drift UP toward room temperature instead).
+                               // VERIFY by comparing against the app's own
+                               // power reading while running.
+                    if (val <= 5000) {
+                      id(ac_power_w).publish_state(val);
+                      mapped = true;
+                    }
+                    break;
+                  case 0x72:   // Fan percent: 1/25/40/55/70/85/100, tracks
+                               // 0x05. This is a WIDE field -- reading it as
+                               // one byte published a constant 0.
+                    if (val <= 100) { id(ac_fan_pct).publish_state(val); mapped = true; }
+                    break;
+                }
+              }
+            }
+
+            // ---- payload records ----
+            // Layout: header at [10:12], then from [13] a list of
+            //   <id> <value>  00  <id> <value>  00  ...  <id> <value>
+            // The LAST record has NO trailing separator, so a fixed 3-byte
+            // stride drops it -- and that is exactly where the short frames
+            // put their data. Walk it as 2-byte records with a 1-byte gap.
+            //
+            // Only `0C 0C` payloads follow this layout. `0D 0D` is a different
+            // payload type; parsing it this way yields garbage, so skip it.
+            if (v[3] == 0x21 && n >= 15 && v[10] == 0x0C && v[11] == 0x0C) {
+              std::string unknown;
+              size_t i = 13;
+              while (i + 1 < n) {
+                uint8_t fid = v[i], val = v[i + 1];
+                // Wide fields carry a 32-bit value and are handled by the scan
+                // above. Step over the whole record, otherwise the 2-byte walk
+                // chews their tail and invents phantom fields (RPM 0x04B0 was
+                // showing up as a bogus "04=B0").
+                if ((fid == 0x02 || fid == 0x03 || fid == 0x5C ||
+                     fid == 0x64 || fid == 0xC0 || fid == 0x60 ||
+                     fid == 0x65 || fid == 0x72) &&
+                    i + 4 < n && v[i+1] == 0x00 && v[i+2] == 0x00) {
+                  i += 6;
+                  continue;
+                }
+
+                // 0x95 / 0xBD / 0xBE / 0xBF are ALSO wide, and were missing
+                // from the list above. The 3-byte walk therefore chewed each
+                // one into a real record PLUS a phantom `00=00`, which is why
+                // Unknown Fields read
+                //   95=00 00=00 A4=00 BD=00 00=00 BE=00 00=00 BF=00 00=00
+                // Six of those ten entries did not exist.
+                //
+                // Established 2026-08-10 by a width discriminator that does
+                // not rely on plausibility: walk the record BOTH ways and see
+                // which one lands on a real next id.
+                //
+                //     0x95  narrow -> next id 0x00     wide -> 0x15 (Health)
+                //     0xBD  narrow -> next id 0x00     wide -> 0xBE
+                //     0xBE  narrow -> next id 0x00     wide -> 0xBF
+                //     0xBF  narrow -> next id 0x00     wide -> 0xC0
+                //     0xA4  narrow -> next id 0xBD     wide -> 0x00
+                //
+                // Field id 0x00 is not a thing, so the reading that produces
+                // it is the wrong one. Note 0xA4 goes the OTHER way -- it is
+                // genuinely narrow. Do not "tidy" it into this group.
+                //
+                // Alignment survived either way (3+3 == 6), which is exactly
+                // why this hid for so long: nothing downstream broke, the
+                // frame just grew six fields that were never sent.
+                //
+                // These stay in Unknown Fields rather than being skipped
+                // silently -- they are still unidentified, and their real
+                // 16-bit value is what will eventually identify them.
+                if ((fid == 0x95 || fid == 0xBD || fid == 0xBE || fid == 0xBF) &&
+                    i + 4 < n && v[i+1] == 0x00 && v[i+2] == 0x00) {
+                  uint16_t wv = ((uint16_t) v[i+3] << 8) | v[i+4];
+                  char t[24];
+                  sprintf(t, "%02X=%u(w) ", fid, wv);
+                  unknown += t;
+                  i += 6;
+                  continue;
+                }
+
+                // NAMESPACES. The byte before each id is not a separator,
+                // it is a NAMESPACE selector:
+                //
+                //     <ns> <id> <data...>
+                //      00  plain field        02  parameter        01  seen once
+                //
+                //   00 27 <v>            -> field 0x27 = Drying
+                //   02 27 00 00 00 51    -> parameter 0x27 = setpoint 81 F
+                //
+                // Same id, different meaning. The walk lands on the ID, so the
+                // namespace is the byte BEFORE it. Ignoring this manufactured
+                // every `27=00` and `00=51` ever seen in Unknown Fields.
+                {
+                  uint8_t ns = (i >= 1) ? v[i - 1] : 0x00;
+                  if (ns == 0x02) {
+                    int wdt;
+                    switch (fid) {
+                      case 0x21: case 0x22: case 0x27: case 0x64: wdt = 4; break;
+                      case 0x24: case 0x25:                       wdt = 1; break;
+                      default:                                    wdt = -1; break;
+                    }
+                    if (wdt > 0 && i + 1 + (size_t) wdt <= n) {
+                      mapped = true;
+                      i += 1 + (size_t) wdt + 1;   // id + data + next ns byte
+                      continue;
+                    }
+                  }
+                }
+
+                // 0x39 is a LENGTH-PREFIXED LIST, not a normal record:
+                //
+                //   00 39 12 | 02 03 07 08 09 0B 15 17 1C 1F 21 22 23 24 27 28 2A 31 | 00 5E ...
+                //         ^^   \_______________ exactly 0x12 = 18 bytes ___________/
+                //
+                // Walked as 3-byte records it produced a stream of phantom
+                // fields (`39=12 03=07 09=0B 17=1C 21=22 24=27 2A=31`) that
+                // sat in Unknown Fields looking like real unmapped work.
+                // Alignment survived only by luck: 2 + 18 + 1 = 21 is divisible
+                // by three, so the records AFTER the list still landed right.
+                // A list of any other length would have desynchronised the
+                // rest of the frame.
+                //
+                // *** THE LIST IS DYNAMIC. *** An earlier version of this
+                // comment called it a static table, because every dump used
+                // for comparison had been captured with the unit RUNNING.
+                //
+                // 0x0B drops out while the unit is off and returns when it
+                // comes back on -- observed 2026-08-10:
+                //   13:59:19  18 entries, 0B present, power on
+                //   21:35:18  17 entries, 0B ABSENT,  power off (21:35:20)
+                //   21:36:41  18 entries, 0B present, power on  (21:36:33)
+                //
+                // So the length byte genuinely varies at runtime, which is why
+                // this must be parsed as length-prefixed rather than as a
+                // hardcoded 18 bytes. Best reading: the functions CURRENTLY
+                // available, not the ones the unit supports in principle --
+                // still a lead, but "static" is ruled out.
+                if (fid == 0x39 && i + 1 < n) {
+                  uint8_t len = v[i + 1];
+                  if (len > 0 && i + 2 + (size_t) len <= n) {
+                    std::string lst;
+                    char t[4];
+                    for (uint8_t k = 0; k < len; k++) {
+                      sprintf(t, "%02X ", v[i + 2 + k]);
+                      lst += t;
+                    }
+                    if (!lst.empty()) lst.pop_back();
+                    if (lst != prev_caps) {
+                      prev_caps = lst;
+                      id(ac_caps).publish_state(lst);
+                    }
+                    mapped = true;
+                    i += (size_t) len + 3;      // fid + len + payload + sep
+                    continue;
+                  }
+                }
+
+                // 0x38 is the SAME length-prefixed encoding as 0x39 above --
+                // adjacent ids, one family. Established 2026-08-10 during the
+                // generator-mode test: it is emitted only when the power
+                // limiter actually engages, and its width tracks its content.
+                //
+                //   00 38 01 32   len 1, payload 0x32 -- limiter ENGAGED
+                //   00 38 00      len 0, empty        -- limiter RELEASED
+                //
+                // Sequence that established it: LV1 (2D=01) pulled compressor
+                // target 48 -> 44 -> 42 and 0x38 went to len-1; LV2 (2D=02)
+                // let it back to 48 and 0x38 went empty. LV3 and off produced
+                // no 0x38 at all, because it had already released -- so this
+                // tracks ENGAGEMENT, not which level is selected.
+                //
+                // What 0x32 (=50) means is NOT established. Do not label it a
+                // percent: a 50% cap would not clamp a 48% demand, so that
+                // reading is already suspect. More data needed with the
+                // compressor driven near 100%.
+                if (fid == 0x38 && i + 1 < n) {
+                  uint8_t len = v[i + 1];
+                  if (i + 2 + (size_t) len <= n) {
+                    std::string s;
+                    if (len == 0) {
+                      s = "released";
+                    } else {
+                      char t[8];
+                      s = "engaged (";
+                      for (uint8_t k = 0; k < len; k++) {
+                        sprintf(t, "%02X ", v[i + 2 + k]);
+                        s += t;
+                      }
+                      s.erase(s.size() - 1);
+                      s += ")";
+                    }
+                    id(ac_power_limit).publish_state(s);
+                    mapped = true;
+                    i += (size_t) len + 3;      // fid + len + payload + sep
+                    continue;
+                  }
+                }
+
+                i += 3;
+                switch (fid) {
+                  case 0x01:   // POWER -- confirmed: toggled 00/01/00/01
+                               // exactly in step with four power presses.
+                    id(ac_power).publish_state(val != 0);
+                    mapped = true;
+                    break;
+                  case 0x12:   // MODE -- mapped 2026-08-10 by pressing each
+                               // mode in the app and reading the COMMAND frame
+                               // it generated, so no behaviour was inferred:
+                               //   0 auto   1 cool   2 dry   3 fan   4 heat
+                               // Cool is double-confirmed: it was the power-on
+                               // state AND the value the fifth press returned.
+                               // NOTE dry arrives as `05=02 12=02` -- selecting
+                               // dry also forces a fan speed.
+                    if (val <= 4) {
+                      static const char *const NAMES[5] =
+                          {"auto", "cool", "dry", "fan", "heat"};
+                      id(ac_mode_raw).publish_state(val);
+                      id(ac_mode_name).publish_state(NAMES[val]);
+                      mapped = true;
+                    }
+                    break;
+                  case 0x05:   // FAN -- 7 speeds + auto, so do not clamp tight
+                    if (val <= 15) { id(ac_fan_speed).publish_state(val); mapped = true; }
+                    break;
+                  // ---- LOUVERS ----------------------------------------
+                  // Encoding, confirmed 2026-08-10 across all 17 buttons:
+                  //   bit 3 (0x08) CLEAR -> sweeping, the app's "... Flow"
+                  //   bit 3 (0x08) SET   -> parked,   the app's "... Fix"
+                  //   bits 0-2           -> 1-based index within that group
+                  // The tell was a gap at 05-08 in both fields: there is no
+                  // Flow #5 and no Fix #0. Values 1-4 and 9-13 are the only
+                  // ones any BUTTON produces.
+                  //
+                  // But 0x08 is real and the app cannot produce it. Both axes
+                  // reported 0x08 the instant TURBO was pressed on the handheld
+                  // (2026-08-10 19:18:15), in the same frame that took the fan
+                  // to speed 7 / 100% and cleared fan-auto. Reading: bit 3 set
+                  // with index 0 means "no user-selected position -- the unit
+                  // is driving the louver itself". That reading is ONE
+                  // observation and is NOT verified; it is left unnamed here on
+                  // purpose. 0x10 has also been seen historically on 0x0E and
+                  // is likewise unexplained.
+                  case 0x11: {   // VERTICAL -- "Up-Down Flow Control", 8 buttons
+                    static const char *const V_FLOW[3] =
+                      {"Up-Down Flow", "Up Flow", "Down Flow"};
+                    static const char *const V_FIX[5] =
+                      {"Up Fix", "Above Up Fix", "Middle Fix",
+                       "Above Down Fix", "Down Fix"};
+                    uint8_t idx = val & 0x07;
+                    const char *nm = nullptr;
+                    if (val & 0x08) { if (idx >= 1 && idx <= 5) nm = V_FIX[idx - 1]; }
+                    else            { if (idx >= 1 && idx <= 3) nm = V_FLOW[idx - 1]; }
+                    if (nm != nullptr) id(ac_louver_v).publish_state(nm);
+                    else { char b[24]; sprintf(b, "unnamed (0x%02X)", (unsigned) val);
+                           id(ac_louver_v).publish_state(b); }
+                    mapped = true;
+                    break;
+                  }
+                  case 0x0E: {   // HORIZONTAL -- "Left-Right Flow Control", 9 buttons
+                    static const char *const H_FLOW[4] =
+                      {"Left-Right Flow", "Left Flow", "Middle Flow", "Right Flow"};
+                    static const char *const H_FIX[5] =
+                      {"Left Fix", "A Bit Left Fix", "Middle Fix",
+                       "A Bit Right Fix", "Right Fix"};
+                    uint8_t idx = val & 0x07;
+                    const char *nm = nullptr;
+                    if (val & 0x08) { if (idx >= 1 && idx <= 5) nm = H_FIX[idx - 1]; }
+                    else            { if (idx >= 1 && idx <= 4) nm = H_FLOW[idx - 1]; }
+                    if (nm != nullptr) id(ac_louver_h).publish_state(nm);
+                    else { char b[24]; sprintf(b, "unnamed (0x%02X)", (unsigned) val);
+                           id(ac_louver_h).publish_state(b); }
+                    mapped = true;
+                    break;
+                  }
+                  case 0x2D: {  // GENERATOR MODE -- the app's "generator mode"
+                                // sub-screen, LV1/LV2/LV3. A generator power
+                                // limiter: it caps what the compressor may
+                                // draw so a genset is not overloaded.
+                                // Confirmed 2026-08-10, exact 1:1 with four
+                                // presses in the order LV1, LV2, LV3, off.
+                                // LV1 is the RESTRICTIVE end -- it pulled
+                                // compressor target 48% -> 42%; LV2 released
+                                // it straight back to 48%.
+                    static const char *const GEN[4] = {"off", "LV1", "LV2", "LV3"};
+                    id(ac_generator_raw).publish_state(val);
+                    if (val < 4) id(ac_generator).publish_state(GEN[val]);
+                    else { char b[24]; sprintf(b, "unmapped (%u)", (unsigned) val);
+                           id(ac_generator).publish_state(b); }
+                    mapped = true;
+                    break;
+                  }
+                  case 0x0C:   // Previously believed to be per-axis companions
+                  case 0x0D:   // of the two louver fields. They are NOT: across
+                               // all 19 louver presses on 2026-08-10 neither
+                               // appeared even once. Still unexplained.
+                               // NOTE: these two must keep their OWN break.
+                               // Appending a case label to the end of this
+                               // group once made them fall through into the
+                               // eco-mode publish below, so Eco Mode flapped
+                               // ON/OFF/ON across the three frames of a single
+                               // state dump.
+                    mapped = true;
+                    break;
+                  case 0x1E:   // LIGHT -- the display LED. App toggle,
+                               // confirmed 1E=00 then 1E=01.
+                    id(ac_light).publish_state(val != 0);
+                    mapped = true;
+                    break;
+                  case 0x25:   // BEEP -- key/command confirmation tone.
+                               // Confirmed 25=00 then 25=01.
+                    id(ac_beep).publish_state(val != 0);
+                    mapped = true;
+                    break;
+                  case 0x15:   // HEALTH -- ionizer / air purification.
+                               // Confirmed 15=01 then 15=00.
+                    id(ac_health).publish_state(val != 0);
+                    mapped = true;
+                    break;
+                  case 0x27:   // DRYING -- anti-mildew, dries the coil after
+                               // shutdown. Confirmed 27=01 then 27=00.
+                               // *** NOT the same 0x27 as the `02` parameter,
+                               // which is the setpoint in F. Separate id
+                               // spaces; the prefix is the only difference. ***
+                    id(ac_drying).publish_state(val != 0);
+                    mapped = true;
+                    break;
+                  case 0x22:   // SLEEP -- an ENUM, not a boolean, and that
+                               // distinction was nearly missed. One toggle gave
+                               // `01` then `00`, which looks exactly like a
+                               // flag; the app screen showing three variants is
+                               // what prompted checking. All four values then
+                               // came straight from command frames:
+                               //   0 off   1 standard   2 the aged   3 child
+                               // Manual note: rejected in FAN and DRY mode, so
+                               // a write may be silently ignored.
+                    {
+                      static const char *const SLEEP[4] =
+                          {"off", "standard", "the aged", "child"};
+                      id(ac_sleep_raw).publish_state(val);
+                      if (val < 4) {
+                        id(ac_sleep_name).publish_state(SLEEP[val]);
+                      } else {
+                        char b[24];
+                        sprintf(b, "unmapped (%u)", (unsigned) val);
+                        id(ac_sleep_name).publish_state(b);
+                      }
+                      mapped = true;
+                    }
+                    break;
+                  case 0x13:   // ECO MODE. Command `13=01` captured directly:
+                               // the AC confirmed with `DF 01 00 13 01` and the
+                               // compressor target fell 86%% -> 44%% within two
+                               // seconds, which is eco doing exactly what it
+                               // claims.
+                    id(ac_eco).publish_state(val != 0);
+                    mapped = true;
+                    break;
+                  case 0xDF:   // Moves in lockstep with 0x13 -- eco's companion
+                               // flag. Explains the DF/13 pairs seen earlier.
+                    mapped = true;
+                    break;
+                  case 0x73:   // FAN AUTO flag. Manual speeds send 73=00;
+                               // auto sends 73=01 together with 05=00. That is
+                               // why "fan auto" looked like speed zero -- it is
+                               // a flag plus a speed, not a speed value.
+                    id(ac_fan_auto).publish_state(val != 0);
+                    mapped = true;
+                    break;
+                  case 0x0A:   // phantom -- the low half of a wide field that
+                               // the 2-byte walk splits. Handled above.
+                    mapped = true;
+                    break;
+                  default: {
+                    // Everything else is the mapping queue. POWER and ROOM
+                    // TEMPERATURE are still unidentified and will surface here.
+                    char t[16];
+                    sprintf(t, "%02X=%02X ", fid, val);
+                    unknown += t;
+                    break;
+                  }
+                }
+              }
+              if (!unknown.empty() && unknown != prev_fields) {
+                prev_fields = unknown;
+                id(ac_unknown_fields).publish_state(unknown);
+              }
+            }
+
+            // SETPOINT: frames ending `02 27 00 00 00 <degF>`. Kept as a
+            // trailing-signature match because the setpoint sits outside the
+            // record list, after it.
+            if (v[3] == 0x21 && n >= 16 && v[n-6] == 0x02 && v[n-5] == 0x27 &&
+                v[n-4] == 0x00 && v[n-3] == 0x00 && v[n-2] == 0x00) {
+              uint8_t sp = v[n-1];
+              // Sanity band: a real Fahrenheit setpoint, not a stray byte.
+              if (sp >= 60 && sp <= 90) {
+                id(ac_setpoint).publish_state(sp);
+                mapped = true;
+              }
+            }
+
+            if (!wide.empty() && wide != prev_wide) {
+              prev_wide = wide;
+              id(ac_wide_fields).publish_state(wide);
+              ESP_LOGI(TAG, "  wide: %s", wide.c_str());
+            }
+
+            if (!mapped && hex != prev_unmapped) {
+              prev_unmapped = hex;
+              id(ac_last_unmapped).publish_state(hex);
+              ESP_LOGI(TAG, "  ^ UNMAPPED -- this is the one to decode");
+            }
+
+            v.clear();
+          }
+          }
+
+  # ---------------------------------------------------------------------------
+  # DEAF-TAP WATCHDOG
+  #
+  # Twice on 2026-08-10 this node stopped receiving while staying perfectly
+  # healthy in every other respect: online over WiFi, pinging with 0% loss,
+  # globals intact (frame_count held its value, so it had NOT crashed or
+  # rebooted), and ZERO rejected frames and ZERO CRC failures -- meaning not one
+  # corrupt byte arrived either. Total silence on BOTH channels at once.
+  #
+  #   20:57:53 -> 21:35:24   deaf 37 min
+  #   21:40:19 -> 21:57:09   deaf 17 min, only ~5 min after recovering
+  #
+  # The first recovery followed an AC power cycle, which pointed at the level
+  # shifter, since its HV side is fed from harness YELLOW +5V and the ESP runs
+  # on USB. That was WRONG. Rebooting the ESP alone -- AC untouched -- brought
+  # reception back, so the shifter is exonerated and the fault is on this side.
+  #
+  # Most likely a wedged UART peripheral: an RX FIFO overrun during a burst that
+  # never gets cleared. Both channels dying together fits, because both are
+  # serviced by the same 10ms lambda, and if that loop falls behind during a
+  # power-on dump both FIFOs overflow at once.
+  #
+  # This node is listen-only and holds no state worth preserving, so a restart
+  # is a free recovery. Cheaper than diagnosing an intermittent that takes
+  # 20-40 minutes to reproduce.
+  #
+  # *** SILENCE IS ALWAYS ABNORMAL -- the bus does NOT go quiet when the AC is
+  # switched off. *** The WBR1 dongle runs from the head unit's standby supply,
+  # which is how the app can turn the unit on remotely, so it keeps talking
+  # regardless of run state. Proven in our own capture at 21:35:18-21:35:20 on
+  # 2026-08-10: a full state dump AND the module's `02 64` heartbeat arrived
+  # while `power` was off. An earlier draft of this watchdog was written around
+  # the false assumption that an off AC means a quiet bus, and would have been
+  # crippled by a grace period it did not need.
+  #
+  # The only genuinely quiet case is the head unit losing MAINS -- a breaker
+  # off for service. The reboot cap below exists solely for that, so the node
+  # does not reboot all night while the disconnect is pulled.
+  #
+  # *** TRIGGER ON RAW BYTES, NOT ON FRAMES. ***
+  # The first version watched last_frame_ms and needed a 6 min threshold,
+  # because frames are sparse and bursty. Bytes are not: the counters showed
+  # traffic arriving continuously right up to the instant the tap died. So
+  # byte-silence is a far sharper signal, and 2 min is both safer and 3x
+  # faster to recover than the 6 min frame-based version.
+  #
+  # 2 min is ~3x the slowest regular traffic (the ~60 s module heartbeat) and
+  # ~3x the longest healthy gap ever observed between bytes.
+  #
+  # This also removes a blind spot the frame version had: if bytes were
+  # arriving but nothing framed -- a CRC or alignment fault rather than a dead
+  # receiver -- the frame watchdog would reboot pointlessly, forever. Watching
+  # bytes means a reboot only happens for the failure a reboot actually fixes.
+  #
+  # The root cause was found on 2026-08-11 -- per-frame ESP_LOGI in the read
+  # loop, see the comment at that call. This watchdog is now a BACKSTOP rather
+  # than a daily necessity: 9.4 h continuous with zero trips after the fix,
+  # against 5-38 min before it. Keep it anyway; it costs nothing and it is what
+  # will catch the next regression (including someone leaving the logger on
+  # DEBUG).
+  #
+  # The 120 s threshold is now evidenced rather than guessed: across that 9.4 h
+  # run the longest legitimate gap between raw bytes was 60 s -- the module
+  # heartbeat -- so this sits at exactly 2x the slowest real traffic.
+  #
+  # The grace period is still needed: after the 21:57:09 reboot the first frame
+  # did not arrive for 7.5 min, unexplained. Rebooting into that would loop.
+  - interval: 30s
+    then:
+      - lambda: |-
+          static const char *const TAG = "aciq";
+          const uint32_t DEAF_MS  = 2 * 60 * 1000UL;    // byte-silence, not frames
+          const uint32_t GRACE_MS = 10 * 60 * 1000UL;   // > the 7.5 min seen
+          const uint8_t  MAX_TRIES = 3;
+
+          uint32_t up = millis();
+          if (up < GRACE_MS) return;                    // post-boot grace
+
+          uint32_t last = id(last_byte_ms);
+          bool deaf = (last == 0) || (up - last > DEAF_MS);
+
+          if (!deaf) {
+            // Bytes ARE arriving. If none of them have framed in a long while,
+            // that is a CRC or alignment fault, not a dead receiver -- and a
+            // reboot would not fix it. So warn, do not restart. This is the
+            // case the old frame-based watchdog would have rebooted on forever.
+            uint32_t lastf = id(last_frame_ms);
+            if (lastf != 0 && up - lastf > 10 * 60 * 1000UL) {
+              ESP_LOGW(TAG, "bytes arriving but nothing framed for %u min -- "
+                            "suspect CRC/alignment, NOT the receiver",
+                       (unsigned) ((up - lastf) / 60000UL));
+            }
+            return;
+          }
+
+          if (id(wd_reboots) >= MAX_TRIES) {
+            // Three restarts did not bring it back, so this is not the wedge
+            // we are trying to recover -- most likely mains is off. Stop
+            // rebooting and just say so; the counter clears itself the moment
+            // a frame arrives.
+            ESP_LOGW(TAG, "WATCHDOG: still deaf after %u restarts -- giving up. "
+                          "Check mains to the head unit.", (unsigned) id(wd_reboots));
+            return;
+          }
+          id(wd_reboots) = id(wd_reboots) + 1;
+          ESP_LOGW(TAG, "WATCHDOG: tap deaf %u s -- restart %u of %u",
+                   (unsigned) (last == 0 ? up / 1000UL : (up - last) / 1000UL),
+                   (unsigned) id(wd_reboots), (unsigned) MAX_TRIES);
+          App.safe_reboot();
+
+button:
+  # So the tap can be bounced from Home Assistant instead of walking out to the
+  # garage and unplugging USB. Added after doing exactly that twice.
+  - platform: restart
+    name: "Restart"
+    entity_category: diagnostic

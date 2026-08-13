@@ -75,7 +75,8 @@ If you found this repo by searching for `A5 01 01 21`, that is why it exists.
 |---|---|
 | **[`PROTOCOL.md`](PROTOCOL.md)** | The complete wire format: framing, message types, the ACK handshake, record encoding, and the full field map with units |
 | **[`METHOD.md`](METHOD.md)** | How it was decoded, what the dead ends were, and the analyser settings that actually work. Read this before decoding a different unit |
-| **[`esphome/aciq-listen.yaml`](esphome/aciq-listen.yaml)** | The node. Two receive taps, plus the takeover controls behind a transmit interlock that is off on every boot |
+| **[`esphome/aciq-k18w.yaml`](esphome/aciq-k18w.yaml)** | The node. Two receive taps, plus the takeover controls behind a transmit interlock that is off on every boot |
+| **[`esphome/aciq-k18w-listen.yaml`](esphome/aciq-k18w-listen.yaml)** | The listen-only build, kept deliberately. **Contains no transmit code at all** — not gated, absent. Use it for mapping, and as the rollback |
 | **[`esphome/aciq_tx.h`](esphome/aciq_tx.h)** | Frame construction — CRC, length, ACK, clock reply, RSSI heartbeat, commands. Never hand-compute a length or a checksum |
 | **[`tools/`](tools/)** | Pure-python decoders for Kingst LA1010 CSV and binary exports. No numpy, no dependencies |
 
@@ -152,12 +153,19 @@ drivers rather than merely misbehaving. One thing owns that wire.
 
 | | **Listen-only** | **Takeover** |
 |---|---|---|
+| Flash | `aciq-k18w-listen.yaml` | `aciq-k18w.yaml` |
 | Stock dongle | stays in `CN-16` | removed |
 | ESP32 `GPIO17` | **not connected** | drives harness BLACK |
 | Vendor app | keeps working | gone |
 | Local telemetry | ~30 entities | ~30 entities |
 | Local control | none | **yes, no cloud** |
 | Appliance modified | no | no — the dongle plugs back in |
+
+**Both builds are kept on purpose.** `aciq-k18w-listen.yaml` is not an old
+version left lying around — it contains **no transmit code at all**, not merely
+disabled transmit. It cannot drive the bus however it is wired or clicked, which
+is what makes it the right build for the work described in
+[Continuing the mapping](#continuing-the-mapping), and the honest rollback.
 
 ### Listen-only
 
@@ -303,7 +311,7 @@ with one more wire, added *after* this works. Do not wire `GPIO17` yet.
 1. Wire the [listen-only](#listen-only-wiring) taps. Nothing on `GPIO17`.
 2. Put `wifi_ssid`, `wifi_password` and `ap_fallback_password` in your ESPHome
    `secrets.yaml`.
-3. Flash `esphome/aciq-listen.yaml` over USB with the CN-16 5 V lead
+3. Flash `esphome/aciq-k18w.yaml` over USB with the CN-16 5 V lead
    disconnected.
 4. Read the boot log for your chip revision. The config sets
    `minimum_chip_revision: "3.1"` — **change it to match your board** or it may
@@ -413,6 +421,39 @@ rather than negative.
 **Work out what LV2 and LV3 do.** Only LV1 engages the power limiter, at both
 loads tested.
 
+### Continuing the mapping
+
+**Do this on `aciq-k18w-listen.yaml`, with the dongle back in `CN-16`.** That is
+not a downgrade — it is the configuration the entire field map was built in, and
+the reason is that **the app is a command generator you do not have to write.**
+
+With the dongle installed and the phone app paired, every button you press in
+the app produces a real, correct, vendor-authored `0A 0A` command frame on
+harness BLACK. You tap `GPIO4` and read it. No transmitting, no risk of a
+malformed frame reaching the mainboard, and no guessing at encodings — the app
+shows you what a legitimate command looks like, labelled by the screen you
+pressed it on.
+
+That is how `0x12` (mode), the louvers, generator mode and sleep were all
+mapped: press one control, read one frame, match it to the label the app itself
+uses. Once the takeover is wired, that source disappears — you are the module,
+and nothing else generates commands for you to study.
+
+Watch **`Last Unmapped Frame`** and **`Unknown Fields`**; they are the work
+queue. Two hard-won rules from [`METHOD.md`](METHOD.md):
+
+- **Press the same button six times, ~5 s apart.** Whatever increments is the
+  value; whatever stays constant is the field id. Boundaries guessed from a
+  single capture have been wrong repeatedly.
+- **Never attribute a frame from its shape alone.** The remote batches fast
+  presses and transmits only the settled value, so eight quick presses look
+  identical to one command. Attribution comes from knowing which button you
+  pressed.
+
+Nine ids remain, listed in [Where this stops](#where-this-stops) — but be warned
+that **none of them responded to any user-facing control**, so they are probably
+diagnostics or configuration rather than buttons nobody has pressed yet.
+
 **Find a state-query frame**, if one exists. The app shows full state the
 instant it opens, so *something* asks — but no query has been identified on the
 bus. Without it, every reboot leaves unchanged fields unknown until the unit
@@ -431,7 +472,8 @@ README.md                    this file
 PROTOCOL.md                  wire format and field map
 METHOD.md                    how it was decoded, and the dead ends
 CHANGELOG.md                 what changed, and which claims were corrected
-esphome/aciq-listen.yaml     the listener, and the takeover controls
+esphome/aciq-k18w.yaml       the node: decoder, and the takeover controls
+esphome/aciq-k18w-listen.yaml  listen-only build -- no transmit code at all
 esphome/aciq_tx.h            frame construction: CRC, ACK, clock, commands
 captures/reference-frames.txt  annotated real frames, one per message type
 tools/check-docs.py          documentation drift checks -- run before committing

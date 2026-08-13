@@ -103,6 +103,30 @@ does not fire `set_action`, so it cannot loop back onto the wire.
 `21=1600 (60.8F)` and `22=3100 (87.8F)` -- the unit advertising its own bounds.
 Those were previously only a constant copied into the clamp. They match.
 
+### Both builds are kept, and the listen-only one is not a leftover
+
+`esphome/aciq-listen.yaml` was renamed to **`esphome/aciq-k18w.yaml`** -- the
+node is no longer listen-only, so the filename should not say it is. The model
+number also matches how anyone finds this repo in the first place.
+
+The **listen-only build is published alongside it** as
+`esphome/aciq-k18w-listen.yaml`, deliberately. It contains **no transmit code
+at all** -- not gated behind a switch, absent -- so it cannot drive the bus
+however it is wired or clicked.
+
+That matters for anyone continuing the field mapping, and the reason is worth
+stating plainly: **with the dongle installed and the app paired, the vendor's
+own app is a command generator.** Every button press produces a real, correct,
+labelled `0A 0A` frame on harness BLACK, which you read on GPIO4 without
+transmitting anything. That is how mode, the louvers, generator mode and sleep
+were all mapped. **The takeover destroys that source** -- once you are the
+module, nothing else generates commands for you to study.
+
+`device_name` was NOT renamed with the file. It is the mDNS hostname and OTA
+target, and Home Assistant's ESPHome entry is bound to it; changing it takes the
+node offline until HA is pointed at the new name. Cosmetic gain, real outage --
+left for a deliberate change.
+
 ### Also
 
 - `Transmit Enabled` changed from `ALWAYS_OFF` to `RESTORE_DEFAULT_OFF`. The
