@@ -235,6 +235,42 @@ remotes make this worse: the manual for this one covers several variants, and
 notes plainly that *"if the indoor unit does not have a particular function,
 pressing that function's button will have no effect."*
 
+### 8. Re-sending a command the unit already satisfies does NOT refresh state
+
+Tested 2026-08-13, and it fails. Worth knowing because it is the obvious idea
+and it looks like it should work.
+
+The problem it tries to solve is real: the AC reports only what **changes**, so
+after every node reboot each unchanged field has no value at all until something
+moves it. There is no known query frame.
+
+Powering the unit on emits a near-complete state dump unasked — room
+temperature, power, fan, both louvers, mode, display light, coil, outdoor air,
+input power, compressor, sleep, beep, drying, generator mode, power limit, the
+capability list, eco, fan auto, and the `21`/`22` setpoint limits all arrive
+together. So the tempting move is to send `01=01` to an already-on unit and
+harvest the dump without changing anything.
+
+**It produces nothing.** Five fields that had not been reported for six minutes
+were watched across the attempt — capability list, mode, eco, vertical louver,
+setpoint — and not one was re-reported.
+
+The dump belongs to the **transition** into on, not to receiving the command. A
+redundant instruction changes nothing, so the AC says nothing, which is
+consistent with everything else about how it behaves.
+
+Two things follow. **Watch `last_reported`, not `last_changed`**, when testing
+whether something re-reports — a value that arrives unchanged does not move
+`last_changed`, and neither does anything if the entity was recently renamed,
+which resets `last_changed` on all of them at once and looks exactly like a
+state dump. And note the power-on dump does **not** include the setpoint: it
+only appears in frames carrying the trailing `02 27 00 00 00 <degF>` signature,
+so even a real dump leaves that field unknown.
+
+Until a query frame is found, the working answer is not to need current state:
+use absolute controls (`Set Setpoint`, `Power On`, `Power Off`) rather than
+relative ones.
+
 ## What actually worked
 
 ### Cross-checking field widths against the app's own UI

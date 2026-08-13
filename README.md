@@ -459,6 +459,11 @@ instant it opens, so *something* asks — but no query has been identified on th
 bus. Without it, every reboot leaves unchanged fields unknown until the unit
 happens to report them.
 
+Do not spend an evening on the obvious shortcut: **re-sending `01=01` to an
+already-on unit does not trigger the power-on state dump.** Tested and
+falsified — the dump belongs to the transition, not to the command. See
+[gotcha 8](METHOD.md#8-re-sending-a-command-the-unit-already-satisfies-does-not-refresh-state).
+
 **A real `climate` entity.** Deliberately not built yet: the plain buttons and
 selects exist so each command shape could be proven one at a time. Because the
 AC reports its own settled state, this can be a genuinely verified state machine
