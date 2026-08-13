@@ -442,12 +442,33 @@ and drove `0x11`; **"Left-Right Flow Control"** has 9 and drove `0x0E`.
 The structure gave itself away as a **gap at `05`–`08`** in both fields — there
 is no Flow #5 and no Fix #0.
 
-**`0x08` is real and no button produces it.** Both axes report `0x08` the moment
-**Turbo** is pressed on the handheld, in the same frame that takes the fan to
-speed 7 / 100 % and clears fan-auto. Likely "no user-selected position, the unit
-is driving the louver" — but that is **one observation and is not verified**, so
-it is deliberately left unnamed in the decoder. `0x10` has also been seen on
-`0x0E` and is unexplained.
+**`0x08` is real, and the best reading is SWING OFF.** The app cannot produce it,
+which is why it went unexplained for so long: the app offers only sweep modes
+(`01`–`04`) and explicit fixed positions (`09`–`0D`), and has no plain "off". The
+**handheld's swing button does**.
+
+The encoding accounts for it exactly. Bit 3 set means parked and bits 0–2 are a
+1-based index, so `0x08` is *parked with no index* — parked, with no position
+chosen. That is what "swing off" is.
+
+Two independent routes produce it, which is what makes this more than a guess:
+
+| Cause | Observed |
+|---|---|
+| **Handheld swing button, toggled off** | 2026-08-13. Swing on gave `0x01` on the axis pressed; swing off gave `0x08`. Both axes, and horizontal was seen cycling `01 → 08 → 01 → 08` across repeated presses |
+| **Turbo** | Both axes go to `0x08` in the same frame that takes fan to speed 7 / 100 % and clears fan-auto — consistent, because Turbo kills the swing to blast |
+
+**Still marked `unnamed (0x08)` in the decoder, deliberately.** The swing
+observation is a burst of toggles rather than a clean attributed pair, and this
+project has been wrong before by reading a burst. **The test that would settle
+it:** press swing ON, wait 15 s, press swing OFF. A deterministic `01 → 08` at
+that spacing earns it a name.
+
+Note also that remote presses never appear as command frames — they arrive over
+IR, so the bus shows only the resulting state. The absence of a `0A 0A` frame is
+**not** evidence the unit acted on its own.
+
+`0x10` has also been seen on `0x0E` and is unexplained.
 
 **`0x0C` / `0x0D` are not the per-axis companions** an earlier draft claimed.
 Across all 17 louver presses neither appeared once.
