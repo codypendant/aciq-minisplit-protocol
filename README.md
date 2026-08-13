@@ -217,6 +217,8 @@ The harness colours **do not follow convention**:
 
 Transposing yellow and red puts 5 V straight into a GPIO. **Meter them.**
 
+### Listen-only wiring
+
 ```
    HARNESS              LEVEL SHIFTER            ESP32
    YELLOW  +5V ───────── HV
@@ -227,21 +229,78 @@ Transposing yellow and red puts 5 V straight into a GPIO. **Meter them.**
                                                  GPIO17  ── nothing
 ```
 
-Notes that cost time:
+The dongle stays in `CN-16`, so each tapped line has to continue *and* branch —
+that needs **3-conductor** lever connectors (WAGO 221-413), not the 2-conductor
+221-412.
+
+### Takeover wiring
+
+One added wire: `GPIO17` through a **spare channel of the same shifter** onto
+harness BLACK. Two channels then sit on BLACK, one sensing and one driving —
+that is fine, because one is an input and one is an output, and once the dongle
+is gone nothing else drives that line at all. BLACK is the module→AC direction;
+the mainboard only listens on it.
+
+```
+   HARNESS              LEVEL SHIFTER            ESP32
+   YELLOW  +5V ───────── HV
+                         └────────────────────── VIN     ← see power, below
+   WHITE   GND ───────── GND ─────────────────── GND
+                         LV  ─────────────────── 3V3
+   RED   (AC TX) ─────── HV1 : LV1 ───────────── GPIO16
+   BLACK (mod TX) ────── HV2 : LV2 ───────────── GPIO4
+   BLACK (driven)  ───── HV3 : LV3 ───────────── GPIO17  ← the only new wire
+```
+
+**Order matters, and one ordering damages hardware:**
+
+1. **Flash first.** `Transmit Enabled` is off on every boot and is not restored
+   from flash, so the firmware is safe to run with the dongle still installed.
+   Confirm **`Frames Sent` = 0** before touching any wiring. If it is not zero,
+   stop — the interlock is not working.
+2. Wire `GPIO17`. Still safe: the switch is off.
+3. **Detach the dongle — check which end.** The requirement is that the
+   mainboard and the ESP32 stay joined and the dongle does not. If your tap is
+   spliced downstream of `CN-16` (which 3-conductor lever nuts imply), pulling
+   the plug at `CN-16` disconnects *you* as well — open the **dongle's**
+   conductor on each of the four lever nuts instead. Either way the test is the
+   same: `Frames Decoded` must keep climbing.
+4. Only now turn `Transmit Enabled` on, and send nothing at first. If the ACK is
+   accepted, the AC's frame rate falls from ~75/min to ~3/min — see
+   [The ACK handshake](PROTOCOL.md#the-ack-handshake).
+
+Keeping `GPIO4` on BLACK afterwards is deliberate: every frame you send comes
+straight back in and is decoded as a module frame, so the log proves your own
+transmissions are well-formed. Free verification, no extra parts.
+
+> **If TX is garbage but RX is clean, suspect the shifter, not the firmware.**
+> BSS138-style auto-direction boards drive LOW hard and rely on a pull-up for
+> the HIGH transition; at 115200 that rise time is marginal. The fix is a
+> push-pull buffer (74AHCT125), not more debugging. It did **not** bite on this
+> build — two channels on BLACK put ~5 kΩ to +5 V instead of 10 kΩ, which helps
+> — but it is the first thing to check.
+
+### Both configurations
 
 - **The shifter needs both rails.** HV from harness +5 V, LV from the ESP32's
   3V3. Missing either and it passes nothing while looking perfectly healthy.
-- **The dongle stays plugged in**, so each tapped line has to continue *and*
-  branch — that needs **3-conductor** lever connectors (WAGO 221-413), not the
-  2-conductor 221-412.
-- **Power the ESP32 from USB** during this work, and never from USB and CN-16
-  5 V simultaneously.
+  Note that HV is a *reference*, not a power tap — it is required even when the
+  board runs from USB.
+- **Power.** USB during bring-up, or harness +5 V to **VIN** — never `3V3`, and
+  **never both at once**; back-feeding destroys boards and USB ports. Running
+  from `CN-16` means pulling the 5 V lead before every USB flash. A
+  **470–1000 µF bulk cap** at the board is worth fitting for WiFi current
+  spikes; if the rail sags the ESP32 reboots, which shows up as **Frames
+  Decoded restarting from zero** rather than freezing.
 - `CN-16` is bare 2.0 mm male pins with a polarising key; DuPont does not fit.
   Cut and reuse the factory harness rather than hunting a mating connector.
 
 ## Quick start
 
-1. Wire it as above. Confirm nothing is on GPIO17.
+**Start here whichever configuration you want** — the takeover is the same node
+with one more wire, added *after* this works. Do not wire `GPIO17` yet.
+
+1. Wire the [listen-only](#listen-only-wiring) taps. Nothing on `GPIO17`.
 2. Put `wifi_ssid`, `wifi_password` and `ap_fallback_password` in your ESPHome
    `secrets.yaml`.
 3. Flash `esphome/aciq-listen.yaml` over USB with the CN-16 5 V lead
@@ -250,7 +309,13 @@ Notes that cost time:
    `minimum_chip_revision: "3.1"` — **change it to match your board** or it may
    not boot.
 5. Adopt the device in Home Assistant.
-6. Watch **Frames Decoded** climb and **Frames Rejected** stay at zero.
+6. Watch **Frames Decoded** climb, **Frames Rejected** stay at zero, and
+   **`Frames Sent` stay at zero**. The control entities appear either way; they
+   cannot transmit until you deliberately enable them.
+
+That is a complete, useful install. If you also want control, continue to
+[Takeover wiring](#takeover-wiring) — and read it in order, because one of the
+orderings damages hardware.
 
 **If frames never arrive — or arrive and then stop — read `RX Bytes AC` and
 `RX Bytes Module` before touching the wiring.** They count raw bytes *before*

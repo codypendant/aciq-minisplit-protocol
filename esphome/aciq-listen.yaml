@@ -1,38 +1,45 @@
 # =============================================================================
-# ACiQ MINI SPLIT (K18W) -- LISTEN-ONLY PROTOCOL DECODER
+# ACiQ MINI SPLIT (K18W) -- PROTOCOL DECODER, AND OPTIONALLY THE MODULE ITSELF
 #
-# Taps the AC's transmit line and decodes its state broadcasts. It NEVER
-# transmits. The stock TCL WBR1 dongle stays plugged in and keeps working
-# exactly as it does today -- this board is a bystander on one wire.
+# Decodes the AC's state broadcasts off its own bus. It supports TWO wirings
+# from one file, and which one you have is decided by a wire and a switch:
 #
-# Purpose: map the remaining protocol fields (mode, swing, room temp) from a
-# node that runs for days, instead of 25-second logic-analyser captures. Once
-# the field map is complete, control gets added to a parser that is already
-# known to be correct.
+#   LISTEN-ONLY  the stock TCL WBR1 dongle stays in CN-16 and keeps working,
+#                GPIO17 is not connected, and this board is a bystander.
+#   TAKEOVER     the dongle is removed and THIS NODE IS THE MODULE: it drives
+#                harness BLACK, answers every report, and can command the unit.
 #
-# Written 2026-08-09 from four LA1010 captures. Protocol notes below are
-# MEASURED, not inferred from prior art -- see the warning in
-# `aciq-minisplit.yaml` about why the published TCL components do not apply.
+# Written 2026-08-09 from four LA1010 captures; transmit added and proven on
+# hardware 2026-08-13. Protocol notes below are MEASURED, not inferred from
+# prior art -- no published TCL/Midea/Tuya component matches this wire format.
 #
 # ---------------------------------------------------------------------------
-# *** WIRING -- THREE WIRES, AND GPIO17 MUST STAY DISCONNECTED ***
+# *** WIRING ***
 #
 #   harness WHITE (GND) ------------------------- ESP32 GND
-#   harness RED   (AC transmits)  -- shifter ----- ESP32 GPIO16   (RX only)
-#   harness BLACK (module transmits) -- shifter -- ESP32 GPIO4    (RX only)
+#   harness RED   (AC transmits)  -- shifter ----- ESP32 GPIO16   RX
+#   harness BLACK (module transmits) -- shifter -- ESP32 GPIO4    RX
+#   harness BLACK (driven)        -- shifter ----- ESP32 GPIO17   TX
+#                                                  ^^^^^^ TAKEOVER ONLY
 #
-#                                   GPIO17 ------- *** NOTHING ***
+# *** THE ONE THING THAT DAMAGES HARDWARE ***
 #
-# BOTH taps are receive-only. Leaving the transmit pin unconnected is what
-# makes this safe: there is no bus contention to get wrong, and no malformed
-# frame can reach the mainboard. Do not "temporarily" wire GPIO17 to see what
-# happens.
+# Never drive BLACK while the dongle is plugged into CN-16. BLACK is the
+# MODULE's transmit output; two push-pull outputs on one net damages drivers
+# rather than merely misbehaving. Exactly one thing may own that wire.
 #
-# BLACK is tapped because it is the direction an ESP32 replacement will one day
-# have to SPEAK. With the phone app paired, driving the app generates real
-# module->AC commands on that line -- which is the cheapest possible way to
-# learn the command format without transmitting anything ourselves.
-# Listening to a line we will later drive is still listening.
+# This file is nonetheless safe to flash with the dongle still installed,
+# because transmit is gated behind the `Transmit Enabled` switch and every
+# path runs through the single `tx_send` script. Verify `Frames Sent` = 0
+# after flashing, before wiring GPIO17.
+#
+# *** IF THE DONGLE EVER GOES BACK IN: unwire GPIO17, or flash a listen-only
+# build, BEFORE reconnecting it. *** `Transmit Enabled` is RESTORE_DEFAULT_OFF,
+# so it comes back on after a reboot if it was on when the node went down.
+#
+# Keeping GPIO4 on BLACK after GPIO17 is wired is deliberate: everything this
+# node sends comes straight back in and is decoded as a MOD frame, so the log
+# proves our own transmissions are well-formed. Free verification, no parts.
 #
 # RED is the AC's transmit line -- PROVEN in both directions:
 #   module powered alone, no AC -> BLACK active, RED idle
