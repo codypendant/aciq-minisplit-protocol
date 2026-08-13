@@ -267,9 +267,24 @@ state dump. And note the power-on dump does **not** include the setpoint: it
 only appears in frames carrying the trailing `02 27 00 00 00 <degF>` signature,
 so even a real dump leaves that field unknown.
 
+**What does work, with caveats: an actual off → on cycle.** Sending `01=00`
+then `01=01` is a real transition, and the dump follows about a second later.
+Two limits:
+
+- **It does not recover the setpoint.** Observed directly: a genuine off/on
+  cycle was performed and `Setpoint` stayed unknown through it and afterwards.
+  Setpoint only arrives on frames carrying the trailing `02 27 00 00 00 <degF>`
+  signature, and the dump is not one of them.
+- **It is a real compressor cycle, not a free query.** Acceptable occasionally
+  by hand. Do **not** wire it to `on_boot` — a brownout loop would then cycle
+  the compressor on every restart, which is precisely the situation the
+  deaf-tap watchdog exists to ride out.
+
 Until a query frame is found, the working answer is not to need current state:
 use absolute controls (`Set Setpoint`, `Power On`, `Power Off`) rather than
-relative ones.
+relative ones. A press of the handheld remote also makes the unit report, and
+unlike a power cycle it costs nothing — one press, then leave it alone, because
+the remote batches fast presses and transmits only the settled value.
 
 ## What actually worked
 
