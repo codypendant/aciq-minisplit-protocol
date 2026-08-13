@@ -42,9 +42,18 @@ roadmap asking for work already finished. None of it needed judgement to catch.
 - **No vendor firmware, artwork, or manual PDFs.** The companion repo had four
   ACiQ/Midea assets purged from its git history before going public. Do not
   reintroduce that category of content here.
-- **GPIO17 stays disconnected** in every published wiring diagram and config
-  until transmit is deliberately, separately documented as such. Listen-only is
-  a safety property of this build, not an incidental detail.
+- **Never publish wiring that drives BLACK with the dongle still in `CN-16`.**
+  This rule used to read "GPIO17 stays disconnected, until transmit is
+  deliberately documented as such." That happened on 2026-08-13: the dongle was
+  removed, the ESP32 took over the bus, and a setpoint command was proven on
+  hardware. So GPIO17 is now wired *in the takeover configuration only*.
+
+  What has not changed is the hazard underneath the old rule. Harness BLACK is
+  the module's transmit output; two push-pull outputs on one net damages
+  drivers. Every published diagram and config must make the configuration
+  explicit and must not let a reader mix the two. The listen-only path stays
+  documented and supported — it is a legitimate endpoint for anyone who wants
+  to keep the vendor app.
 - **`CN-16` is 5 V logic.** Any wiring guidance must keep the level shifter and
   must keep the yellow=+5V / white=GND warning, because the harness colours do
   not follow convention and transposing them puts 5 V into a GPIO.

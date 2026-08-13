@@ -52,6 +52,21 @@ RETRACTED = [
      ["CHANGELOG.md", "PROTOCOL.md"]),
     (r"0x64[^\n]{0,60}not a function",
      "0x64 does track compressor speed; it is just slow to update", []),
+    # Retired 2026-08-13, when the dongle came out and a setpoint command was
+    # proven on hardware. Listen-only is still SUPPORTED and still documented --
+    # what is retracted is the claim that it is the only possible endpoint, and
+    # any blanket statement that GPIO17 is unwired. The takeover config drives
+    # it. CHANGELOG keeps the history, and the config comments must be free to
+    # explain the hazard.
+    (r"listen-only is the final design|deliberately not wired|"
+     r"GPIO17 goes nowhere",
+     "the takeover is built and proven; listen-only is one of two configurations",
+     ["CHANGELOG.md"]),
+    # The relative-command bug. Absolute controls exist now; nothing should
+    # tell a reader to reach for the stepping buttons first.
+    (r"never transmits|without transmitting a single byte",
+     "the node transmits in the takeover configuration",
+     ["CHANGELOG.md", "METHOD.md"]),
 ]
 
 fails = []

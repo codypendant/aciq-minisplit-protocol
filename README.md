@@ -2,8 +2,9 @@
 
 Reverse-engineered UART protocol for an **ACiQ `ACIQ-K18W-W-32-HP2300`**
 wall-mount mini split whose only smart interface is a cloud-bound WiFi dongle,
-plus an ESPHome node that decodes the appliance's own bus into Home Assistant
-sensors **without transmitting a single byte**.
+plus an ESPHome node that decodes the appliance's own bus into Home Assistant —
+and, if you want it, replaces the dongle outright for local control with no
+cloud.
 
 The unit ships with a **TCL WBR1** WiFi module on the indoor board's `CN-16`
 header. It talks to TCL's servers and nothing else — no LAN protocol, no local
@@ -13,11 +14,14 @@ speed, louver positions, compressor speed and input power.
 
 This documents that bus.
 
-> **Status: read-only by choice, not by limitation.** The listener decodes live
-> state today and verifies every frame's CRC. The checksum is **solved**
-> (CRC-16/XMODEM — see [`PROTOCOL.md`](PROTOCOL.md)) and the command format is
-> known, so transmit is now a wiring decision rather than a research problem.
-> It is still deliberately not wired. See [Where this stops](#where-this-stops).
+> **Status: local control works, proven on hardware 2026-08-13.** The dongle was
+> removed, the ESP32 took over `CN-16`, and a setpoint command from Home
+> Assistant moved the value on the unit's own display. Zero CRC failures.
+>
+> **Both configurations are supported and documented.** Listen-only keeps the
+> dongle and the vendor app and transmits nothing; the takeover replaces the
+> dongle and gives you control without cloud. Pick one — they are mutually
+> exclusive for a hardware reason. See [Two configurations](#two-configurations).
 
 ## The protocol is not the one every guide says it is
 
@@ -113,32 +117,74 @@ property is why a read-only node is useful rather than a stepping stone — no
 dead reckoning, no drift, and it sees changes made from the remote, the app, or
 the unit's own buttons.
 
-## Why listen-only is the final design, not a stage
+### Controls — takeover configuration only
 
-The transmit pin is **not connected**. Not disabled in software — physically
-absent from the wiring.
+These exist in the config either way, but they **cannot transmit** unless
+`Transmit Enabled` is on, and turning that on with the dongle still installed is
+the one thing that damages hardware. See [Two configurations](#two-configurations).
 
-This started as caution: the appliance is at ceiling height, the harness must be
-cut to tap it, and a malformed frame on a partly-understood bus is a bad idea
-when the failure mode involves a ladder and a teardown.
+| Entity | Sends | Notes |
+|---|---|---|
+| **Transmit Enabled** | — | The interlock. Every transmit path is gated on it, and the single UART write lives behind it |
+| **Set Setpoint** | `0x02` + `p0x27` | **Absolute, in °F.** Prefer this — it needs no prior state |
+| **Power On** / **Power Off** | field `0x01` | Absolute, same reason |
+| **Set Mode** | field `0x12` | auto / cool / dry / fan / heat. **Untransmitted so far.** Selecting dry also forces a fan speed |
+| **Set Fan** | `0x73` + `0x05` | auto / mute / 2–7. **Untransmitted so far** |
+| Setpoint Up / Setpoint Down | `0x02` + `p0x27` | **Relative** — they read current state and step it, so they refuse to act when the setpoint is unknown |
+| Power Toggle | field `0x01` | Relative, same caveat |
+| **Frames Sent** | — | Should be **0** until you deliberately enable transmit |
+| **ESP WiFi Signal** | — | Ours, sent to the AC in the module heartbeat. Distinct from Module WiFi Signal, which after takeover is this value echoed back off the wire |
 
-It ended as the design, for a better reason: **the stock WiFi dongle stays
-plugged in and keeps working.** The app still functions, including the
-diagnostics it exposes that the bus does not, and the appliance is entirely
-unmodified. Meanwhile Home Assistant gets thirty-odd local entities the dongle
-never surfaces — coil temperature, compressor commanded vs actual, input power,
-outdoor air, louver positions, and the feature flags.
+> **Relative controls are a trap after a reboot.** The AC reports only what
+> *changes*, so unchanged fields have no value at all until something moves
+> them. The relative controls log a warning and send nothing rather than
+> computing a command from a missing value — an early build did not, and
+> transmitted the clamp floor. **Use the absolute controls**, or press one
+> button on the handheld to make the unit report.
 
-**The tradeoff is real and worth stating plainly.** Black is the module's
-transmit output. An ESP32 driving it too puts two push-pull outputs on one net,
-which damages drivers rather than merely misbehaving. So keeping the dongle
-means no control from this path, permanently. You get complete local telemetry
-and keep the vendor app; you do not get local control.
+## Two configurations
 
-If you want control instead, the protocol is fully documented — see
-[`PROTOCOL.md`](PROTOCOL.md), including the checksum and command format — and
-the honest way to do it is to **remove the dongle** and let the ESP32 own the
-bus.
+**They are mutually exclusive, and the reason is electrical, not political.**
+Harness BLACK is the *module's* transmit output. An ESP32 driving it while the
+dongle is still plugged in puts two push-pull outputs on one net, which damages
+drivers rather than merely misbehaving. One thing owns that wire.
+
+| | **Listen-only** | **Takeover** |
+|---|---|---|
+| Stock dongle | stays in `CN-16` | removed |
+| ESP32 `GPIO17` | **not connected** | drives harness BLACK |
+| Vendor app | keeps working | gone |
+| Local telemetry | ~30 entities | ~30 entities |
+| Local control | none | **yes, no cloud** |
+| Appliance modified | no | no — the dongle plugs back in |
+
+### Listen-only
+
+The transmit pin is physically absent from the wiring — not disabled in
+software. The stock dongle stays plugged in and keeps working, including the
+app diagnostics the bus does not expose, and Home Assistant still gets the
+thirty-odd entities the dongle never surfaces: coil temperature, compressor
+commanded vs actual, input power, outdoor air, louver positions, feature flags.
+
+This is a legitimate endpoint, not a stage. If you want the app, stop here.
+
+### Takeover
+
+The dongle comes out and the ESP32 becomes the module. You lose the app and the
+self-check it offers. You gain setpoint, power, mode and fan control with
+nothing leaving your network.
+
+**Replacing the module means inheriting its obligations, not just its wire.**
+The node must ACK every report ~50 ms later, answer the clock request, and send
+the periodic RSSI heartbeat. This is not optional politeness: an unacknowledged
+mainboard **retries hard** — measured at ~75 frames/min with nothing answering,
+against ~3.5/min once the ACKs start. See
+[The ACK handshake](PROTOCOL.md#the-ack-handshake).
+
+**It is reversible.** Nothing is cut that the listen-only build did not already
+cut; the dongle plugs back into `CN-16`. If you go back, **unwire `GPIO17` or
+reflash a listen-only config first** — otherwise the next reboot drives BLACK
+against the dongle's own output.
 
 <details>
 <summary>The way to have both, if you insist</summary>
@@ -262,12 +308,22 @@ switched off.
 handshake, record encoding, the command format and the checksum are all
 documented and verified.
 
-What remains is deliberate:
+Control is no longer on this list — setpoint was commanded successfully on
+2026-08-13. What remains:
 
-- **Transmit is not wired.** GPIO17 goes nowhere. This is a ceiling-mounted
-  appliance whose harness has to be cut to tap, and the failure mode for a bad
-  frame involves a ladder and a teardown. Everything needed to transmit is in
-  [`PROTOCOL.md`](PROTOCOL.md); connecting it is a decision, not a discovery.
+- **Only setpoint and the ACK/clock/heartbeat obligations are proven on
+  hardware.** `Set Mode` and `Set Fan` are written and shipped but **have never
+  been sent**. Both are absolute, so neither depends on knowing current state.
+- **The command decoder mis-splits the `02` parameter namespace was fixed;
+  the report decoder was not.** The command walk now reads namespaces properly.
+  The report walk has the same structural blind spot and is left alone because
+  it feeds every working entity — it copes today, but it is an audit waiting to
+  happen.
+- **After a reboot the node is blind to anything that has not changed since.**
+  The AC reports deltas, so unchanged fields have no value at all. Absolute
+  controls (`Set Setpoint`, `Power On`/`Power Off`) work regardless; the
+  relative buttons refuse to act and say so. **No query frame is known** — if
+  one exists, finding it is the single highest-value remaining discovery.
 - **A handful of ids remain unidentified** — `0x17`, `0x35`, `0x47`, `0x48`,
   `0x5E`, `0x74`, `0xA4`, `0xC9`, and the wide `0x95`, `0xBD`–`0xBF`. **None of
   them responds to any user-facing control**: a sweep of all 17 louver buttons,
@@ -292,11 +348,19 @@ rather than negative.
 **Work out what LV2 and LV3 do.** Only LV1 engages the power limiter, at both
 loads tested.
 
-**Transmit and a real climate entity** are fully specified but deliberately not
-built here — see [why](#why-listen-only-is-the-final-design-not-a-stage). If you
-are building that, everything you need is in [`PROTOCOL.md`](PROTOCOL.md):
-framing, the checksum, the command format, and the setpoint units (**centi-°C**,
-not °F).
+**Send Set Mode and Set Fan**, the two shipped commands never actually
+transmitted.
+
+**Find a state-query frame**, if one exists. The app shows full state the
+instant it opens, so *something* asks — but no query has been identified on the
+bus. Without it, every reboot leaves unchanged fields unknown until the unit
+happens to report them.
+
+**A real `climate` entity.** Deliberately not built yet: the plain buttons and
+selects exist so each command shape could be proven one at a time. Because the
+AC reports its own settled state, this can be a genuinely verified state machine
+rather than the optimistic dead reckoning most IR-based integrations do — it can
+show what the unit *did*, not what it was told.
 
 ## Repository layout
 
@@ -305,7 +369,8 @@ README.md                    this file
 PROTOCOL.md                  wire format and field map
 METHOD.md                    how it was decoded, and the dead ends
 CHANGELOG.md                 what changed, and which claims were corrected
-esphome/aciq-listen.yaml     the listener
+esphome/aciq-listen.yaml     the listener, and the takeover controls
+esphome/aciq_tx.h            frame construction: CRC, ACK, clock, commands
 captures/reference-frames.txt  annotated real frames, one per message type
 tools/check-docs.py          documentation drift checks -- run before committing
 tools/crc.py                 checksum: verify, compute, apply

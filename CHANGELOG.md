@@ -1,5 +1,93 @@
 # Changelog
 
+## 2026-08-13 — the dongle came out, and the ESP32 took the bus
+
+**Local control works.** The stock TCL WBR1 was removed from `CN-16`, an ESP32
+took over the harness, and a setpoint command from Home Assistant moved the
+value on the unit's own display. `81 F -> 80 F`, **zero CRC failures** across
+the whole session. Everything below was measured during that changeover.
+
+Listen-only has **not** been retired — it is still supported and still
+documented. The repo now presents [two
+configurations](README.md#two-configurations), and they are mutually exclusive
+for a hardware reason: harness BLACK is the module's transmit output, and two
+push-pull outputs on one net damages drivers.
+
+### The ACK is mandatory in practice
+
+The AC does not fall silent when nothing acknowledges it. **It retries hard.**
+
+| Bus state | AC frames/min |
+|---|---|
+| Stock dongle, acknowledging | ~2.6 |
+| **Nothing answering** | **~75** |
+| ESP32 acknowledging | ~3.5 |
+
+Sustained over 25 minutes and across a reboot of the listener, which rules out a
+power-up burst. This gives a **free health signal**: if the AC's frame rate
+climbs toward 75/min, it is not hearing your ACKs. That is the mainboard's own
+opinion of whether your frames are well-formed, and it is a far better test than
+watching your own transmit counter. It is how this build confirmed its ACK was
+accepted before any command was ever sent.
+
+### The mainboard range-checks commands
+
+A malformed setpoint — `02=1600` (the clamp floor) with a display label of
+`27=00` — was transmitted by accident. **The AC discarded it**; the display
+never moved. Genuinely useful, but one observation of one bad frame: nothing
+establishes where the boundary is, so do not design around it.
+
+### Setpoint takes two records, and the ladder held
+
+```
+00 02 00 00 0A 5A      wide field 0x02  = 2650 centi-degC   the real value
+02 27 00 00 00 50      parameter  0x27  = 0x50 = 80 degF    the display label
+```
+
+`centi = 2700 + (degF - 81) x 50` was derived from earlier captures and then
+**predicted before pressing** — 80 F produced exactly 2650.
+
+### Fixed: the command walk ignored the namespace byte
+
+The first proven setpoint command printed `02=2650 27=00 00=50` instead of
+`02=2650 p27=50` — right numbers, wrong split. A `02` **parameter** record is
+six bytes; the walk assumed three. For a run of `00` records that assumption is
+byte-identical, which is why it survived this long.
+
+The frame on the wire was correct — the AC obeyed it — so this was only ever a
+readback fault. Parameter ids now print with a `p` prefix, because the id spaces
+are separate: field `0x27` is Drying, parameter `0x27` is the setpoint in F.
+
+**The report walk has the same structural blind spot and was deliberately left
+alone.** It copes today and it feeds every working entity; auditing it needs
+real captures, not a late-night edit.
+
+### Relative controls are a trap after a reboot
+
+The AC reports only what **changes**, so after any reboot every unchanged field
+has no value at all. `Setpoint Up`/`Down` and `Power Toggle` read current state
+and step it, and an early build fed `lroundf(NaN)` straight into a command —
+which is where that clamp-floor frame came from.
+
+Those three now refuse to build a frame without real state and log why. Added
+**`Set Setpoint`** (absolute, F), **`Power On`** and **`Power Off`**, which need
+no prior state and work the instant the node boots.
+
+**No state-query frame is known.** The app shows full state the moment it opens,
+so something asks — finding it is the highest-value discovery left.
+
+### Also
+
+- `Transmit Enabled` changed from `ALWAYS_OFF` to `RESTORE_DEFAULT_OFF`. The
+  always-off interlock existed so the firmware was safe to flash with the dongle
+  still installed; that hazard is gone, and meanwhile every reboot was leaving
+  the AC unacknowledged and retrying. **If the dongle ever goes back in, unwire
+  GPIO17 or reflash a listen-only config first.**
+- The BSS138 level shifter was flagged as the most likely hardware failure at
+  115200. It **did not materialise** — transmit was clean from the first frame.
+- `esphome/aciq_tx.h` published: CRC, frame finalisation, and builders for ACK,
+  clock reply, RSSI heartbeat and commands.
+
 ## 2026-08-11 (later) — a falsified prediction, and input power vindicated
 
 **A prediction we published as a lead, then killed.** The remote manual's

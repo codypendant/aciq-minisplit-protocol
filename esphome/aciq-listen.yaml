@@ -136,13 +136,21 @@ substitutions:
   # GPIO16 is the ESP32's native UART2 RX, so this maps to real UART hardware.
   uart_rx: GPIO16
 
-  # BLACK = the module's transmit line. Receive-only, second hardware UART.
+  # BLACK = the module's transmit line. Second hardware UART.
   # NOT GPIO9/10 (UART1's defaults) -- those are wired to the flash chip.
   uart_rx_mod: GPIO4
+
+  # BLACK, driven. Only meaningful once the stock dongle is REMOVED -- see the
+  # transmit section below. Wiring this while the dongle is plugged in puts two
+  # push-pull outputs on one net.
+  uart_tx_mod: GPIO17
 
 esphome:
   name: ${device_name}
   friendly_name: ${humanly_name}
+  # Frame construction for the transmit path. Header-only, no .cpp.
+  includes:
+    - aciq_tx.h
 
 esp32:
   board: esp32dev
@@ -198,6 +206,11 @@ uart:
 
   - id: mod_bus
     rx_pin: ${uart_rx_mod}
+    # Driving the same wire we listen on is deliberate: every frame this node
+    # sends comes straight back in on GPIO4, so the decoder shows our own
+    # traffic labelled MOD. That is free verification that a command actually
+    # went out well-formed, and it costs nothing.
+    tx_pin: ${uart_tx_mod}
     baud_rate: 115200
     data_bits: 8
     parity: NONE
@@ -252,6 +265,15 @@ globals:
 
   # Millis of the last RAW BYTE from either tap. This, not last_frame_ms, is
   # what the watchdog should trigger on -- see the watchdog comment.
+  - id: tx_counter
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: tx_frames
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
   - id: last_byte_ms
     type: uint32_t
     restore_value: no
@@ -385,6 +407,23 @@ sensor:
     entity_category: diagnostic
     accuracy_decimals: 0
     update_interval: never
+
+  # Our own WiFi RSSI, sent to the AC in the module heartbeat so its picture
+  # of the link stays honest once the dongle is gone.
+  - platform: wifi_signal
+    name: "ESP WiFi Signal"
+    id: esp_rssi
+    entity_category: diagnostic
+    update_interval: 60s
+
+  - platform: template
+    name: "Frames Sent"
+    id: ac_tx_frames
+    icon: mdi:upload
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 30s
+    lambda: 'return (float) id(tx_frames);'
 
   # Raw byte counters, published on a timer rather than per byte -- publishing
   # per byte would flood the recorder at 115200 baud. 30 s matches the watchdog
@@ -718,6 +757,27 @@ interval:
             // on every single frame.
             if (id(wd_reboots) != 0) id(wd_reboots) = 0;
 
+            size_t n = v.size();
+
+            // ---- BEING THE MODULE ----------------------------------------
+            // Once the dongle is gone this node owes the AC an answer to
+            // everything it says. Gated twice over: `ch == 0` so we never
+            // reply to our own transmissions echoing back on GPIO4, and
+            // tx_send itself refuses unless Transmit Enabled is on.
+            //
+            // The AC's clock REQUEST (`10 10`) is answered with the clock
+            // frame, not a bare ACK -- the clock reply IS the acknowledgment,
+            // which is why it carries the `80 10` payload type.
+            if (ch == 0 && v[3] == 0x21 && id(tx_enabled).state) {
+              if (n >= 12 && v[10] == 0x10 && v[11] == 0x10) {
+                id(tx_clock)->execute();
+              } else if (n >= 11) {
+                // Byte 4 is the AC's counter; the ACK echoes it at byte 5 and
+                // echoes the payload type as its last byte.
+                id(tx_ack)->execute((int) v[2], (int) v[4], (int) v[10]);
+              }
+            }
+
             // Republishing an identical string on every broadcast would churn
             // the recorder for no information, so only publish on change.
             if (hex != prev_frame) {
@@ -725,7 +785,6 @@ interval:
               id(ac_last_frame).publish_state(hex);
             }
 
-            size_t n = v.size();
             bool mapped = false;
 
             // ACKs carry no state -- they only echo the counter.
@@ -746,37 +805,60 @@ interval:
             // Commands are requests, so nothing here publishes state -- the
             // AC's own report a moment later is the authority.
             if (v[3] == 0x21 && n >= 15 && v[10] == 0x0A && v[11] == 0x0A) {
-              // Commands carry the SAME variable-width records as reports, so
-              // this must skip wide fields exactly as the report walk does.
-              // A flat 3-byte stride once rendered the setpoint record
-              // `02 00 00 0A 8C` as "02=00 0A=8C" -- a real field with the
-              // wrong value, plus a phantom field that does not exist.
+              // Records are <ns> <id> <value...>, and THE NAMESPACE MATTERS:
+              //
+              //   00 <id> <val>             narrow field,     3 bytes
+              //   00 <id> 00 00 <hi> <lo>   wide field,       6 bytes
+              //   02 <id> 00 00 00 <val>    parameter,        6 bytes
+              //
+              // The old walk started at the id byte and ignored the namespace
+              // entirely. For a run of `00` records that is byte-identical, so
+              // it looked correct for as long as nothing else appeared -- but a
+              // `02` PARAMETER is SIX bytes and got read as a 3-byte narrow.
+              //
+              // Caught on the first proven setpoint command, 2026-08-13. It
+              // printed  `02=2650 27=00 00=50`  instead of  `02=2650 p27=50`:
+              // the right numbers, split in the wrong places. The frame on the
+              // wire was CORRECT -- the AC obeyed it and the display moved --
+              // so this was only ever a decode fault. It still had to be fixed,
+              // because the walk desynchronises on anything following a
+              // parameter record, and setpoint sends one every time.
+              //
+              // Parameter ids print with a `p` prefix because the id spaces are
+              // SEPARATE: `27` in the field namespace is DRYING, but `p27` is
+              // the setpoint in degF. Same byte, unrelated meanings.
               std::string cmd;
-              size_t i = 13;
-              while (i + 1 < n) {
-                uint8_t fid = v[i];
-                bool wide = false;
-                switch (fid) {
-                  case 0x02: case 0x03: case 0x5C: case 0x60:
-                  case 0x64: case 0x65: case 0x72: case 0xC0:
-                  case 0x95: case 0xBD: case 0xBE: case 0xBF:
-                               // Kept in step with the report walk below on
-                               // purpose. These four have only ever been seen
-                               // in reports, never commanded -- but if one ever
-                               // is, a mismatched width here would desynchronise
-                               // the whole command frame.
-                    wide = (i + 4 < n && v[i+1] == 0x00 && v[i+2] == 0x00);
-                    break;
-                  default: break;
-                }
+              size_t i = 12;
+              while (i + 2 < n) {
+                uint8_t ns  = v[i];
+                uint8_t fid = v[i+1];
                 char t[32];
-                if (wide) {
-                  sprintf(t, "%02X=%u ", fid,
-                          (unsigned) (((uint16_t) v[i+3] << 8) | v[i+4]));
+                if (ns == 0x02) {
+                  if (i + 5 >= n) break;              // truncated parameter
+                  sprintf(t, "p%02X=%02X ", fid, v[i+5]);
                   i += 6;
                 } else {
-                  sprintf(t, "%02X=%02X ", fid, v[i+1]);
-                  i += 3;
+                  bool wide = false;
+                  switch (fid) {
+                    case 0x02: case 0x03: case 0x5C: case 0x60:
+                    case 0x64: case 0x65: case 0x72: case 0xC0:
+                    case 0x95: case 0xBD: case 0xBE: case 0xBF:
+                               // Kept in step with the report walk below on
+                               // purpose. If one width is edited the other must
+                               // be too, or a commanded wide field
+                               // desynchronises the whole frame.
+                      wide = (i + 5 < n && v[i+2] == 0x00 && v[i+3] == 0x00);
+                      break;
+                    default: break;
+                  }
+                  if (wide) {
+                    sprintf(t, "%02X=%u ", fid,
+                            (unsigned) (((uint16_t) v[i+4] << 8) | v[i+5]));
+                    i += 6;
+                  } else {
+                    sprintf(t, "%02X=%02X ", fid, v[i+2]);
+                    i += 3;
+                  }
                 }
                 cmd += t;
               }
@@ -1461,9 +1543,308 @@ interval:
                    (unsigned) id(wd_reboots), (unsigned) MAX_TRIES);
           App.safe_reboot();
 
+  # Module heartbeat. The dongle sent one about every 60 s carrying its own
+  # WiFi RSSI; we send ours, which keeps the AC's picture of the link honest
+  # and gives an easy "is transmit alive" signal on the bus.
+  - interval: 60s
+    then:
+      - lambda: |-
+          if (!id(tx_enabled).state) return;
+          int32_t dbm = (int32_t) id(esp_rssi).state;
+          if (dbm >= 0 || dbm < -120) dbm = -50;      // implausible -> filler
+          id(tx_send)->execute(aciq::rssi_report(dbm));
+
 button:
   # So the tap can be bounced from Home Assistant instead of walking out to the
   # garage and unplugging USB. Added after doing exactly that twice.
   - platform: restart
     name: "Restart"
     entity_category: diagnostic
+
+# =============================================================================
+# TRANSMIT -- only valid once the stock WiFi dongle is PHYSICALLY REMOVED
+# =============================================================================
+#
+# *** THE INTERLOCK ***
+#
+# Every transmit path below is gated on the `Transmit Enabled` switch, which
+# defaults to OFF on every boot and is NOT restored from flash. That is
+# deliberate: this firmware is safe to flash with the dongle still plugged in,
+# because it cannot speak until someone deliberately turns it on.
+#
+# Turn it on ONLY when all three are true:
+#   1. the stock dongle is unplugged from CN-16
+#   2. GPIO17 is wired through the level shifter to harness BLACK
+#   3. you have read the bring-up sequence in ACIQ_TRANSMIT_BUILD.md
+#
+# Driving BLACK while the dongle is connected puts two push-pull outputs on one
+# net. That damages drivers -- it does not merely misbehave.
+#
+# *** WHAT THIS NODE NOW OWES THE AC ***
+#
+# Replacing the module means inheriting its obligations, not just its wire:
+#
+#   - ACK every report within ~50 ms, echoing the counter and payload type.
+#     The real dongle turned these around in 49.3-50.2 ms.
+#   - Answer the clock request (`10 10`). The AC asks about every ten minutes
+#     and expects whatever sits on CN-16 to be a time source.
+#   - Send the periodic RSSI heartbeat, as the dongle did roughly once a minute.
+#
+# Whether the AC actually MISBEHAVES without these is unknown -- but it does NOT
+# go silent: with no module attached at all, RED stays active (measured on the
+# analyser, see the wiring notes at the top of this file). So an unanswered
+# mainboard keeps broadcasting, and a quiet bus after the dongle comes out is a
+# wiring fault, not the AC waiting on an ACK.
+# Impersonating the dongle faithfully is still the cheap, safe default.
+
+
+# -----------------------------------------------------------------------------
+# CONTROLS
+#
+# Deliberately plain entities rather than a climate component, for bring-up.
+# Each one sends exactly the command shape seen in a real capture, so if
+# something misbehaves the frame can be compared against
+# captures/reference-frames.txt byte for byte. A proper climate entity comes
+# after these are proven, not before.
+#
+# Everything routes through tx_send, so the Transmit Enabled interlock covers
+# all of it. State still comes from the AC's own reports -- these never guess.
+# -----------------------------------------------------------------------------
+
+  # *** RELATIVE COMMANDS MUST NOT RUN ON UNKNOWN STATE ***
+  #
+  # These read the CURRENT value and step it. The AC reports only what CHANGES,
+  # so after every reboot every unchanged field sits at NaN until the unit
+  # happens to report it. `lroundf(NaN)` is undefined behaviour: on 2026-08-13
+  # the very first Setpoint Up press produced `02=1600 27=00` -- the clamp floor
+  # (60.8 F) with a zero display label. The AC range-checked it and threw it
+  # away, which is the only reason nothing happened.
+  #
+  # So every one of these refuses to build a frame without real state. A command
+  # computed from NaN must never reach the wire; a button that does nothing and
+  # says why is strictly better than one that transmits garbage.
+  #
+  # To recover state after a reboot: press any button on the handheld remote.
+  # The AC reports the resulting state and the sensors populate.
+
+  - platform: template
+    name: "Power Toggle"
+    icon: mdi:power
+    on_press:
+      - lambda: |-
+          if (!id(ac_power).has_state()) {
+            ESP_LOGW("aciq.tx", "Power Toggle ignored -- power state unknown. "
+                                "Press a button on the handheld to resync.");
+            return;
+          }
+          bool on = id(ac_power).state;
+          auto c = aciq::Command(id(tx_counter)++);
+          c.field(0x01, on ? 0x00 : 0x01);
+          id(tx_send)->execute(c.build());
+
+  - platform: template
+    name: "Setpoint Up"
+    icon: mdi:thermometer-plus
+    on_press:
+      - lambda: |-
+          if (!id(ac_setpoint).has_state() || std::isnan(id(ac_setpoint).state)) {
+            ESP_LOGW("aciq.tx", "Setpoint Up ignored -- setpoint unknown. "
+                                "Press a button on the handheld to resync.");
+            return;
+          }
+          int f = (int) lroundf(id(ac_setpoint).state) + 1;
+          if (f > 86) f = 86;
+          if (f < 60) f = 60;
+          auto c = aciq::Command(id(tx_counter)++);
+          // Both records, exactly as the app sends: the real value in
+          // centi-Celsius AND the degF display label. Sending only one of
+          // them leaves the unit and its display disagreeing.
+          c.wide(0x02, aciq::centi_c_for_degf(f)).param(0x27, (uint8_t) f);
+          id(tx_send)->execute(c.build());
+
+  - platform: template
+    name: "Setpoint Down"
+    icon: mdi:thermometer-minus
+    on_press:
+      - lambda: |-
+          if (!id(ac_setpoint).has_state() || std::isnan(id(ac_setpoint).state)) {
+            ESP_LOGW("aciq.tx", "Setpoint Down ignored -- setpoint unknown. "
+                                "Press a button on the handheld to resync.");
+            return;
+          }
+          int f = (int) lroundf(id(ac_setpoint).state) - 1;
+          if (f < 60) f = 60;
+          if (f > 86) f = 86;
+          auto c = aciq::Command(id(tx_counter)++);
+          c.wide(0x02, aciq::centi_c_for_degf(f)).param(0x27, (uint8_t) f);
+          id(tx_send)->execute(c.build());
+
+  # ---- ABSOLUTE power. These need no prior state, so they work immediately
+  # after a reboot when `Power Toggle` refuses to. Prefer them.
+  - platform: template
+    name: "Power On"
+    icon: mdi:power-plug
+    on_press:
+      - lambda: |-
+          auto c = aciq::Command(id(tx_counter)++);
+          c.field(0x01, 0x01);
+          id(tx_send)->execute(c.build());
+
+  - platform: template
+    name: "Power Off"
+    icon: mdi:power-plug-off
+    on_press:
+      - lambda: |-
+          auto c = aciq::Command(id(tx_counter)++);
+          c.field(0x01, 0x00);
+          id(tx_send)->execute(c.build());
+
+number:
+  # *** THE FIX FOR THE WHOLE REBOOT-BLINDNESS PROBLEM ***
+  #
+  # Setpoint Up/Down are RELATIVE -- they read the current value and step it --
+  # so they are useless until the AC happens to report a setpoint, which it only
+  # does when one CHANGES. After every reboot that means a trip to the handheld.
+  #
+  # This is ABSOLUTE. It never reads state, so it works the instant the node
+  # boots. Same two records as the buttons: centi-Celsius plus the degF display
+  # label, because sending one without the other leaves the unit and its
+  # display disagreeing.
+  # Named "Set Setpoint" to match Set Mode / Set Fan, and to stay distinct from
+  # the "Setpoint" SENSOR, which is what the AC reports back. Two entities with
+  # one name collide into a `_2` entity_id and there is no telling which is which.
+  - platform: template
+    name: "Set Setpoint"
+    id: ac_set_setpoint
+    icon: mdi:thermometer
+    unit_of_measurement: "°F"
+    min_value: 60
+    max_value: 86
+    step: 1
+    mode: box
+    optimistic: true
+    entity_category: config
+    set_action:
+      - lambda: |-
+          int f = (int) lroundf(x);
+          if (f < 60) f = 60;
+          if (f > 86) f = 86;
+          auto c = aciq::Command(id(tx_counter)++);
+          c.wide(0x02, aciq::centi_c_for_degf(f)).param(0x27, (uint8_t) f);
+          id(tx_send)->execute(c.build());
+
+switch:
+  - platform: template
+    name: "Transmit Enabled"
+    id: tx_enabled
+    icon: mdi:transmission-tower
+    optimistic: true
+    # CHANGED 2026-08-13, after the takeover was proven on hardware.
+    #
+    # This was ALWAYS_OFF, which is what made the firmware safe to flash while
+    # the stock dongle was still plugged into CN-16. That hazard is gone: the
+    # dongle is physically removed, so nothing else drives BLACK.
+    #
+    # ALWAYS_OFF became the bigger problem. Every reboot -- OTA, brownout, the
+    # deaf-tap watchdog -- brought the node back silent, and an unacknowledged
+    # mainboard climbs to ~75 frames/min retrying (measured) until a human
+    # notices and flips this by hand.
+    #
+    # *** IF THE DONGLE EVER GOES BACK INTO CN-16: reflash
+    # `aciq-listen.yaml.listen-only` FIRST, or unwire GPIO17. *** With this set
+    # to restore, a reboot with the dongle present would drive BLACK against the
+    # dongle's own output. Set it back to ALWAYS_OFF if the tap ever returns to
+    # coexisting with the stock module.
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+
+script:
+  # One place that actually touches the wire. Everything else builds a frame
+  # and hands it here, so the interlock cannot be bypassed by accident.
+  - id: tx_send
+    parameters:
+      frame: std::vector<uint8_t>
+    then:
+      - lambda: |-
+          static const char *const TAG = "aciq.tx";
+          if (!id(tx_enabled).state) {
+            ESP_LOGW(TAG, "suppressed %u bytes -- Transmit Enabled is off",
+                     (unsigned) frame.size());
+            return;
+          }
+          id(mod_bus).write_array(frame.data(), frame.size());
+          id(tx_frames)++;
+          std::string hex; char t[4];
+          for (uint8_t b : frame) { sprintf(t, "%02X ", b); hex += t; }
+          if (!hex.empty()) hex.pop_back();
+          ESP_LOGD(TAG, "TX [%2u] %s", (unsigned) frame.size(), hex.c_str());
+
+  # The dongle answered every report ~50 ms later. Queued rather than restart,
+  # so a burst of reports each get their own acknowledgment instead of only the
+  # last one surviving.
+  - id: tx_ack
+    mode: queued
+    max_runs: 8
+    parameters:
+      link: int
+      counter: int
+      ptype: int
+    then:
+      - delay: 50ms
+      - lambda: |-
+          id(tx_send)->execute(
+              aciq::ack((uint8_t) link, (uint8_t) counter, (uint8_t) ptype));
+
+  # Answer the AC's clock request. Uses HA's time, so if HA is unreachable at
+  # boot this stays silent rather than sending a bogus epoch.
+  - id: tx_clock
+    then:
+      - lambda: |-
+          auto now = id(ha_time).now();
+          if (!now.is_valid()) {
+            ESP_LOGW("aciq.tx", "clock requested but time is not valid yet");
+            return;
+          }
+          id(tx_send)->execute(aciq::clock_reply((uint32_t) now.timestamp));
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+select:
+  - platform: template
+    name: "Set Mode"
+    icon: mdi:hvac
+    optimistic: true
+    options: ["auto", "cool", "dry", "fan", "heat"]
+    on_value:
+      - lambda: |-
+          int m = 0;
+          for (int k = 0; k < 5; k++) {
+            static const char *const N[5] = {"auto","cool","dry","fan","heat"};
+            if (x == N[k]) { m = k; break; }
+          }
+          auto c = aciq::Command(id(tx_counter)++);
+          c.field(0x12, (uint8_t) m);
+          id(tx_send)->execute(c.build());
+          // NOTE: selecting dry also forces a fan speed on this unit --
+          // `12=02` arrives with `05=02`. Setting mode alone can therefore
+          // change more than mode. Watch Fan Speed after switching to dry.
+
+  - platform: template
+    name: "Set Fan"
+    icon: mdi:fan
+    optimistic: true
+    options: ["auto", "mute", "2", "3", "4", "5", "6", "7"]
+    on_value:
+      - lambda: |-
+          // 0x73 is the AUTO FLAG, not a speed. Auto is flag=1 with speed 0;
+          // every manual speed is flag=0 plus the speed. Treating auto as
+          // "speed 0" alone does not work.
+          uint8_t speed = 0, autoflag = 0;
+          if (x == "auto")      { autoflag = 1; speed = 0; }
+          else if (x == "mute") { speed = 1; }
+          else                  { speed = (uint8_t) atoi(x.c_str()); }
+          auto c = aciq::Command(id(tx_counter)++);
+          c.field(0x73, autoflag).field(0x05, speed);
+          id(tx_send)->execute(c.build());

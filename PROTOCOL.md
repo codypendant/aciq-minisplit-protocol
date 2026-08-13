@@ -55,6 +55,49 @@ across every exchange observed.
 for a command, `80 0C` for a report, `80 0D` for clock, `80 10` for a clock
 request. Each side runs its own independent counter sequence.
 
+### The ACK is mandatory in practice — the AC retries hard without it
+
+Measured 2026-08-13, during the changeover from the stock dongle to an ESP32.
+The bus was watched with **no module answering at all**, then with the
+replacement acknowledging normally:
+
+| Bus state | AC frames/min |
+|---|---|
+| Stock dongle, acknowledging | ~2.6 |
+| **Nothing answering** | **~75** |
+| ESP32 acknowledging | ~3.5 |
+
+**It does not fall silent when unacknowledged — it escalates**, by roughly 21×,
+and keeps escalating indefinitely (sustained over 25 minutes, and across a
+reboot of the listener, which rules out a power-up burst). The moment ACKs
+started, the rate collapsed to the dongle's own idle rate.
+
+Two consequences worth having:
+
+- **A replacement module must ACK.** Not politeness — the bus is unusable
+  otherwise, flooded with retries.
+- **Frame rate is a free health signal.** If it climbs back toward ~75/min, the
+  AC is not hearing your ACKs. That is a better test than watching your own
+  transmit counter, because it is the *mainboard's* opinion of whether your
+  frames are well-formed. It was how this build first confirmed its ACK was
+  accepted, before any command was ever sent.
+
+Note this does **not** contradict the earlier finding that the AC transmits with
+no module attached — it does, which is what makes listen-only viable. It simply
+transmits far more.
+
+### The mainboard range-checks commands
+
+A malformed setpoint command — `02=1600` (the clamp floor, 16.0 °C) paired with
+a display label of `27=00` — was transmitted by accident during bring-up. **The
+AC discarded it.** The unit's display never moved off 80 °F and no state report
+followed.
+
+So the mainboard validates rather than blindly applying. Useful to know, and a
+genuine mercy during bring-up — but **do not design around it**. It is one
+observation of one malformed frame, and nothing establishes where the boundary
+sits or that every invalid command is caught.
+
 ### The module supplies the clock
 
 The AC asks for the time and the module answers with it:
@@ -99,6 +142,48 @@ one change — and note the records are the same **variable-width** encoding as 
 report, so a command parser must skip wide fields too. A flat 3-byte stride
 renders the setpoint record `02 00 00 0A 8C` as `02=00` plus a phantom `0A=8C`:
 a real field with the wrong value, and a field that does not exist.
+
+### Setpoint sends TWO records, and needs both
+
+Verified by transmitting it, 2026-08-13 — `81 °F → 80 °F`:
+
+```
+00 02 00 00 0A 5A      wide field 0x02  = 2650 centi-degC   <- the real value
+02 27 00 00 00 50      parameter  0x27  = 0x50 = 80 degF    <- the display label
+```
+
+The value the unit acts on is **centi-Celsius**; the `02 27` parameter is the
+Fahrenheit number it shows. The app sends both. Sending only the first leaves
+the unit and its own display disagreeing.
+
+The ladder is exactly **50 centi-degrees per °F**, anchored at 81 °F = 2700 — so
+`centi = 2700 + (degF − 81) × 50`. That was predicted from earlier captures and
+then confirmed on the wire: 80 °F produced `2650` precisely. A plain °F→°C
+conversion lands between steps and the unit rounds somewhere you did not ask for.
+
+### Parsing your own commands back: mind the namespace
+
+A decoder walking a command must read the **namespace byte**, not just stride:
+
+```
+00 <id> <val>              narrow field    3 bytes
+00 <id> 00 00 <hi> <lo>    wide field      6 bytes
+02 <id> 00 00 00 <val>     parameter       6 bytes
+```
+
+For a run of `00` records, ignoring the namespace is byte-identical and looks
+correct indefinitely. A `02` parameter is **six** bytes, and a walk that assumes
+three desynchronises everything after it. This repo's own decoder had that bug:
+the first proven setpoint command printed
+
+```
+02=2650 27=00 00=50        instead of        02=2650 p27=50
+```
+
+— the right numbers, split in the wrong places. The frame on the wire was
+correct; only the readback was wrong. Print parameter ids distinctly (here, a
+`p` prefix), because **the id spaces are separate**: field `0x27` is Drying,
+parameter `0x27` is the setpoint in °F.
 
 ### Sleep is an enum, and nearly wasn't
 
