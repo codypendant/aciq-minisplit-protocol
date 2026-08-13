@@ -76,6 +76,33 @@ no prior state and work the instant the node boots.
 **No state-query frame is known.** The app shows full state the moment it opens,
 so something asks — finding it is the highest-value discovery left.
 
+### Every shipped command proven, same evening
+
+The changeover entry above was written after setpoint worked. The rest followed
+within the hour, so the list is complete rather than partial:
+
+| Command | Sent | Result |
+|---|---|---|
+| Setpoint | `00 02 …` + `02 27 …` | 81 F -> 80 F, display followed |
+| Set Mode | `12=00` | cool -> auto |
+| Set Fan | `73=01 05=00` | fan -> auto |
+| Power Off | `01=00` | unit off |
+| Power On | `01=01` | unit on |
+
+**Zero CRC failures across the whole session.** `0x12=0` matching auto also
+independently re-confirms the mode table, which had been mapped from the app
+rather than by commanding it.
+
+**A control that lied, and the fix.** `Set Setpoint` is an optimistic template
+number, so it sat at its 60 F floor while the unit was at 80 -- one nudge would
+have sent 61 to a unit at 80. The decoder now mirrors every reported setpoint
+into the control, so it tracks the unit instead of guessing. `publish_state()`
+does not fire `set_action`, so it cannot loop back onto the wire.
+
+**Live confirmation of the setpoint limits.** A state dump carried
+`21=1600 (60.8F)` and `22=3100 (87.8F)` -- the unit advertising its own bounds.
+Those were previously only a constant copied into the clamp. They match.
+
 ### Also
 
 - `Transmit Enabled` changed from `ALWAYS_OFF` to `RESTORE_DEFAULT_OFF`. The

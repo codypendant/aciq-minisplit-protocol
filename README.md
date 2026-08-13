@@ -75,7 +75,8 @@ If you found this repo by searching for `A5 01 01 21`, that is why it exists.
 |---|---|
 | **[`PROTOCOL.md`](PROTOCOL.md)** | The complete wire format: framing, message types, the ACK handshake, record encoding, and the full field map with units |
 | **[`METHOD.md`](METHOD.md)** | How it was decoded, what the dead ends were, and the analyser settings that actually work. Read this before decoding a different unit |
-| **[`esphome/aciq-listen.yaml`](esphome/aciq-listen.yaml)** | The listener. Two receive-only taps, no transmit pin connected |
+| **[`esphome/aciq-listen.yaml`](esphome/aciq-listen.yaml)** | The node. Two receive taps, plus the takeover controls behind a transmit interlock that is off on every boot |
+| **[`esphome/aciq_tx.h`](esphome/aciq_tx.h)** | Frame construction — CRC, length, ACK, clock reply, RSSI heartbeat, commands. Never hand-compute a length or a checksum |
 | **[`tools/`](tools/)** | Pure-python decoders for Kingst LA1010 CSV and binary exports. No numpy, no dependencies |
 
 ## What it gives you
@@ -128,8 +129,8 @@ the one thing that damages hardware. See [Two configurations](#two-configuration
 | **Transmit Enabled** | — | The interlock. Every transmit path is gated on it, and the single UART write lives behind it |
 | **Set Setpoint** | `0x02` + `p0x27` | **Absolute, in °F.** Prefer this — it needs no prior state |
 | **Power On** / **Power Off** | field `0x01` | Absolute, same reason |
-| **Set Mode** | field `0x12` | auto / cool / dry / fan / heat. **Untransmitted so far.** Selecting dry also forces a fan speed |
-| **Set Fan** | `0x73` + `0x05` | auto / mute / 2–7. **Untransmitted so far** |
+| **Set Mode** | field `0x12` | auto / cool / dry / fan / heat. Proven: cool → auto. Selecting dry also forces a fan speed |
+| **Set Fan** | `0x73` + `0x05` | auto / mute / 2–7. Proven: auto |
 | Setpoint Up / Setpoint Down | `0x02` + `p0x27` | **Relative** — they read current state and step it, so they refuse to act when the setpoint is unknown |
 | Power Toggle | field `0x01` | Relative, same caveat |
 | **Frames Sent** | — | Should be **0** until you deliberately enable transmit |
@@ -308,12 +309,11 @@ switched off.
 handshake, record encoding, the command format and the checksum are all
 documented and verified.
 
-Control is no longer on this list — setpoint was commanded successfully on
-2026-08-13. What remains:
+Control is no longer on this list. **Every command this build ships was proven
+on hardware on 2026-08-13** — setpoint, mode, fan, and power both ways, plus the
+ACK, clock and heartbeat obligations, with zero CRC failures throughout. What
+remains:
 
-- **Only setpoint and the ACK/clock/heartbeat obligations are proven on
-  hardware.** `Set Mode` and `Set Fan` are written and shipped but **have never
-  been sent**. Both are absolute, so neither depends on knowing current state.
 - **The command decoder mis-splits the `02` parameter namespace was fixed;
   the report decoder was not.** The command walk now reads namespaces properly.
   The report walk has the same structural blind spot and is left alone because
@@ -347,9 +347,6 @@ rather than negative.
 
 **Work out what LV2 and LV3 do.** Only LV1 engages the power limiter, at both
 loads tested.
-
-**Send Set Mode and Set Fan**, the two shipped commands never actually
-transmitted.
 
 **Find a state-query frame**, if one exists. The app shows full state the
 instant it opens, so *something* asks — but no query has been identified on the
