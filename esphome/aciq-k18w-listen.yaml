@@ -722,7 +722,19 @@ interval:
             // the recorder for no information, so only publish on change.
             if (hex != prev_frame) {
               prev_frame = hex;
-              id(ac_last_frame).publish_state(hex);
+              // Home Assistant rejects any state string over 255 chars: it
+              // stores `unknown` instead AND logs an ERROR per frame. A full
+              // status frame is ~100 bytes = ~300 chars, so this entity goes
+              // blank exactly when the unit has the most to say. Cut on a byte
+              // boundary: 245 chars is exactly 82 whole bytes, +4 for the
+              // marker = 249.
+              //
+              // Found 2026-08-15 on the takeover build, where an unACKed bus at
+              // ~72 frames/min made it a log flood as well. Here the dongle is
+              // still installed and still ACKing, so the rate stays low and it
+              // is the silently blank entity that bites, not the volume.
+              id(ac_last_frame).publish_state(
+                  hex.size() > 255 ? hex.substr(0, 245) + " ..." : hex);
             }
 
             size_t n = v.size();
@@ -1343,7 +1355,9 @@ interval:
 
             if (!mapped && hex != prev_unmapped) {
               prev_unmapped = hex;
-              id(ac_last_unmapped).publish_state(hex);
+              // Same 255-char ceiling as Last Frame above.
+              id(ac_last_unmapped).publish_state(
+                  hex.size() > 255 ? hex.substr(0, 245) + " ..." : hex);
               ESP_LOGI(TAG, "  ^ UNMAPPED -- this is the one to decode");
             }
 

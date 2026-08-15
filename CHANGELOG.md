@@ -29,6 +29,12 @@ while destroying the evidence you would use to tell them apart.
 bytes — plus a visible `" ..."`. New [gotcha
 9](METHOD.md#9-publishing-a-whole-frame-to-a-text-sensor--home-assistant-drops-it-at-255-chars).
 
+**Both builds carry the fix.** The ceiling is not a transmit-side problem — it
+is in the decoder, which the listen-only build shares. The flood is milder there
+because the dongle is still ACKing and the bus stays slow, so what bites is the
+quietly blank entity rather than the log volume. That is the more dangerous of
+the two failures, because nothing anywhere reports it.
+
 ### Two corrections to how the health signal reads
 
 - **`Frames Decoded` counts both directions.** Once transmitting, our own frames
