@@ -18,6 +18,11 @@ This documents that bus.
 > removed, the ESP32 took over `CN-16`, and a setpoint command from Home
 > Assistant moved the value on the unit's own display. Zero CRC failures.
 >
+> There is a full Home Assistant **`climate` entity** as of 2026-08-15, and it is
+> fed from decoded bus frames rather than from the commands it sent — so it shows
+> what the unit *did*. See [A verified climate
+> entity](#a-verified-climate-entity).
+>
 > **Both configurations are supported and documented.** Listen-only keeps the
 > dongle and the vendor app and transmits nothing; the takeover replaces the
 > dongle and gives you control without cloud. Pick one — they are mutually
