@@ -43,18 +43,20 @@ roadmap asking for work already finished. None of it needed judgement to catch.
   or tokens. Placeholder IPs marked `CHANGE ME` are fine.
 - **ESPHome configs use `!secret` for every credential**, including the fallback
   AP password.
-- **No vendor firmware, artwork, or manual PDFs.** This rule stands for *this*
-  repo, which carries none and should keep it that way.
+- **No vendor firmware, artwork, or manual PDFs.** The companion repo had four
+  ACiQ/Midea assets purged from its git history before going public. Do not
+  reintroduce that category of content here.
 
-  **Corrected 2026-08-15:** this used to claim the companion repo "had four
-  ACiQ/Midea assets purged from its git history before going public." That is
-  not what happened. `aciq-local-control` still ships four of them —
-  `bg_cool.jpg`, `bg_heat.jpg`, `bg_auto.jpg`, `bg_mode.png` — tracked since its
-  initial commit, and its own `NOTICE.md` states plainly that they are the
-  manufacturer's copyrighted assets and are *not licensed for redistribution*.
-  That was a deliberate, documented decision there, not an oversight; but do not
-  cite it as precedent for a purge that never occurred, and do not assume the
-  category has already been dealt with.
+  This is verified, not folklore: `aciq-local-control` commit `88a3215`
+  (2026-08-09) deleted `bg_cool.jpg`, `bg_heat.jpg`, `bg_auto.jpg` and
+  `bg_mode.png`, rewrote history so no revision contains them, and replaced them
+  with generated 480×480 gradients under the same MIT licence.
+
+  A previous edit of this file on 2026-08-15 claimed the purge never happened.
+  **That claim was wrong and has been withdrawn.** It came from reading a stale
+  local clone whose `origin/main` had not been fetched since before the rewrite,
+  so the working tree still held the old assets. `origin/main` is not the remote
+  until you fetch — check that before making a claim about what is published.
 - **Never publish wiring that drives BLACK with the dongle still in `CN-16`.**
   This rule used to read "GPIO17 stays disconnected, until transmit is
   deliberately documented as such." That happened on 2026-08-13: the dongle was
