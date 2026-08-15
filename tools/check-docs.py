@@ -33,6 +33,13 @@ CONFIG = "esphome/aciq-k18w.yaml"
 RETRACTED = [
     (r"\*\*Unsolved\*\*",
      "the check field is CRC-16/XMODEM and solved", []),
+    # The climate entity shipped 2026-08-15. This is the "roadmap asking for
+    # work already finished" failure the repo was swept for once before, so it
+    # is pinned here rather than trusted to stay fixed. CHANGELOG may say it,
+    # because that is where superseded statements are supposed to live.
+    (r"climate`? entity\.?\*{0,2}\s*Deliberately not built yet|Deliberately not built yet",
+     "the climate entity is built, shipping in esphome/components/aciq_k18w",
+     ["CHANGELOG.md"]),
     (r"blower RPM `0x5C`|`0x5C`[^\n]{0,25}blower",
      "0x5C is the indoor coil thermistor",
      ["CHANGELOG.md", "CLAUDE.md", "METHOD.md", "PROTOCOL.md"]),

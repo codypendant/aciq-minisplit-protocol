@@ -286,6 +286,45 @@ relative ones. A press of the handheld remote also makes the unit report, and
 unlike a power cycle it costs nothing — one press, then leave it alone, because
 the remote batches fast presses and transmits only the settled value.
 
+### 9. Publishing a whole frame to a text sensor — Home Assistant drops it at 255 chars
+
+Found 2026-08-15. **Home Assistant rejects any state string longer than 255
+characters**, stores `unknown` instead, and logs an `ERROR` — *per frame*.
+
+This bites this project specifically because the natural way to expose a frame
+is a hex dump, and the natural format is `"%02X "` per byte — three characters
+each. That puts the ceiling at **85 bytes**, and a full status frame here is
+around 100. So the entity that matters most during bring-up is blank exactly
+when the unit has the most to say.
+
+The failure is loud in the wrong place. Nothing is wrong on the wire, the frame
+decodes perfectly, `CRC Failures` stays 0 — the loss happens after decoding, on
+the Home Assistant side, and the only symptom in the entity is `unknown`.
+
+**It gets much worse when the bus is unhealthy**, which is when you can least
+afford it. Un-acknowledged, the mainboard escalates to ~72 frames/min and nearly
+all of those are full status frames: measured **92 errors in 4.5 minutes**, with
+the entire retrievable log window containing nothing else. The flood evicts the
+history you are trying to read. A logging bug thus disguises itself as a bus
+problem at precisely the moment you are debugging the bus.
+
+The fix is to clamp before publishing, on a byte boundary so the tail is still
+parseable:
+
+```cpp
+id(ac_last_frame).publish_state(
+    hex.size() > 255 ? hex.substr(0, 245) + " ..." : hex);
+```
+
+245 characters is exactly 82 whole bytes, and `" ..."` brings it to 249 — under
+the ceiling with room to spare, and visibly marked as truncated so nobody reads
+a cut frame as a short one. Applied to `Last Frame` and `Last Unmapped Frame`
+both.
+
+**Generalises past this repo:** any ESPHome `text_sensor` carrying a hex dump,
+a JSON blob, or a capability list has the same 255-character ceiling, and the
+per-frame ERROR makes a busy bus unloggable rather than merely lossy.
+
 ## What actually worked
 
 ### Cross-checking field widths against the app's own UI

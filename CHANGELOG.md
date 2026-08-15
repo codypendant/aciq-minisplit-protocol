@@ -1,5 +1,44 @@
 # Changelog
 
+## 2026-08-15 — the climate entity ships, and a 255-char ceiling that hid it
+
+**A real `climate` entity now exists**, in
+[`esphome/components/aciq_k18w/`](esphome/components/aciq_k18w). The README
+section that called it "deliberately not built yet" was true when written and is
+now retired. Every attribute is fed from a decoded bus frame rather than from
+the command path, so it reports **what the unit did**, not what it was told —
+the thing an IR-based integration structurally cannot do.
+
+Round-tripped on hardware: a setpoint change from Home Assistant went out as
+`02=2600 p27=4F`, the mainboard accepted it, and the entity then displayed the
+value from the AC's *own* next report. Zero CRC failures across the session.
+
+### `Last Frame` was silently blank, and it was flooding the log
+
+**Home Assistant rejects any state string over 255 characters**, storing
+`unknown` and logging an ERROR for every frame. At `"%02X "` per byte that
+ceiling is 85 bytes, and a full status frame is ~100 — so the entity was empty
+exactly when the unit had the most to report.
+
+Un-acknowledged the mainboard escalates to ~72 frames/min, nearly all of them
+full status frames: **92 errors in 4.5 minutes**, with the whole retrievable log
+window containing nothing else. A logging bug that impersonates a bus problem
+while destroying the evidence you would use to tell them apart.
+
+`Last Frame` and `Last Unmapped Frame` now clamp to 245 characters — 82 whole
+bytes — plus a visible `" ..."`. New [gotcha
+9](METHOD.md#9-publishing-a-whole-frame-to-a-text-sensor--home-assistant-drops-it-at-255-chars).
+
+### Two corrections to how the health signal reads
+
+- **`Frames Decoded` counts both directions.** Once transmitting, our own frames
+  echo back on the GPIO4 tap and are counted, so the number is no longer
+  comparable to the ~3.5/min figure measured before transmit existed. Compare
+  **`RX Bytes AC` against `RX Bytes Module`** instead — they are per-channel.
+- **`CRC Failures` showing `unknown` means zero, not unknown.** It publishes only
+  from inside the failure branch, so it never emits a zero. An empty reading is
+  the good one.
+
 ## 2026-08-13 — the dongle came out, and the ESP32 took the bus
 
 **Local control works.** The stock TCL WBR1 was removed from `CN-16`, an ESP32

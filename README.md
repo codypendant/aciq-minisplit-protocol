@@ -127,6 +127,7 @@ the one thing that damages hardware. See [Two configurations](#two-configuration
 
 | Entity | Sends | Notes |
 |---|---|---|
+| **Thermostat** | all of the below | The HA `climate` entity, from the external component in `esphome/components/aciq_k18w/`. It **reports what the bus reported**, not what it asked for — see [A verified climate entity](#a-verified-climate-entity) |
 | **Transmit Enabled** | — | The interlock. Every transmit path is gated on it, and the single UART write lives behind it |
 | **Set Setpoint** | `0x02` + `p0x27` | **Absolute, in °F.** Prefer this — it needs no prior state |
 | **Power On** / **Power Off** | field `0x01` | Absolute, same reason |
@@ -464,11 +465,35 @@ already-on unit does not trigger the power-on state dump.** Tested and
 falsified — the dump belongs to the transition, not to the command. See
 [gotcha 8](METHOD.md#8-re-sending-a-command-the-unit-already-satisfies-does-not-refresh-state).
 
-**A real `climate` entity.** Deliberately not built yet: the plain buttons and
-selects exist so each command shape could be proven one at a time. Because the
-AC reports its own settled state, this can be a genuinely verified state machine
-rather than the optimistic dead reckoning most IR-based integrations do — it can
-show what the unit *did*, not what it was told.
+## A verified climate entity
+
+**Built and running since 2026-08-15** — this section used to say "deliberately
+not built yet", and that is no longer true. The plain buttons and selects came
+first so each command shape could be proven one at a time; the `climate` entity
+sits on top of the shapes that were proven.
+
+It lives in [`esphome/components/aciq_k18w/`](esphome/components/aciq_k18w) as a
+local external component, wired in with:
+
+```yaml
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [aciq_k18w]
+```
+
+**What makes it different from most AC integrations:** every attribute it
+publishes is fed from a decoded bus frame — `set_setpoint_f`,
+`set_room_temperature_f`, `set_mode_raw`, `set_fan_state`, `set_power_state`,
+`set_compressor_running` are all called from the record decoder, not from the
+command path. So the entity shows **what the unit did**, not what it was told.
+IR-based integrations cannot do this: with no return path they must dead-reckon,
+and they drift the moment anyone touches the handheld.
+
+Round-tripped on hardware 2026-08-15: a setpoint change sent from Home Assistant
+appeared on the wire as `02=2600 p27=4F`, the mainboard accepted it, and the
+value that came back in the AC's own next report is what the entity displays.
 
 ## Repository layout
 
@@ -480,6 +505,10 @@ CHANGELOG.md                 what changed, and which claims were corrected
 esphome/aciq-k18w.yaml       the node: decoder, and the takeover controls
 esphome/aciq-k18w-listen.yaml  listen-only build -- no transmit code at all
 esphome/aciq_tx.h            frame construction: CRC, ACK, clock, commands
+esphome/components/aciq_k18w/__init__.py     external component: package marker
+esphome/components/aciq_k18w/climate.py      external component: config schema
+esphome/components/aciq_k18w/aciq_climate.h  the climate entity, declarations
+esphome/components/aciq_k18w/aciq_climate.cpp  climate state machine, fed by the bus
 captures/reference-frames.txt  annotated real frames, one per message type
 tools/check-docs.py          documentation drift checks -- run before committing
 tools/crc.py                 checksum: verify, compute, apply

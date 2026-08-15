@@ -136,8 +136,24 @@
 # =============================================================================
 
 substitutions:
-  device_name: aciq-listen
-  humanly_name: "Garage Mini Split Listener"
+  # Renamed 2026-08-13 alongside the file -- the node is not listen-only any
+  # more, and this string is the mDNS hostname, the OTA target and the build
+  # directory (`/data/build/<name>`), so leaving it stale spreads the old name
+  # through everything.
+  #
+  # Safe to change here because Home Assistant addresses this node by IP with
+  # the config entry keyed on its MAC, not by hostname: entity unique_ids are
+  # MAC-derived, so nothing is orphaned and no entity ids change. Verified in
+  # `.storage/core.config_entries` before renaming, not assumed.
+  device_name: aciq-k18w
+  # Renamed 2026-08-13: it stopped being a "listener" when it became the module.
+  #
+  # NOTE the entity IDs do NOT follow this. They were minted at first discovery
+  # as `sensor.garage_mini_split_listener_*` and Home Assistant keeps registry
+  # entries keyed on unique_id, so they stay as they are. Display names update,
+  # entity ids do not. That is deliberate -- entity ids are what dashboards and
+  # automations reference, and renaming them breaks every one of those.
+  humanly_name: "Garage Mini Split"
 
   # RED = the AC's transmit line, through the level shifter.
   # GPIO16 is the ESP32's native UART2 RX, so this maps to real UART hardware.
@@ -167,6 +183,13 @@ esp32:
     # "ESP32 Chip: ESP32 rev3.1, 2 core(s)". ESPHome itself then recommended
     # both of these. Do NOT copy to another board without re-checking -- a
     # "3.1" floor will not boot on older silicon.
+    #
+    # RE-CONFIRMED on the NEW 30-pin DevKit V1, 2026-08-15, from its own boot
+    # log -- not copied from the old board:
+    #   "chip revision: v3.1"  (bootloader)
+    #   "ESP32 Chip: ESP32 rev3.1, 2 core(s)"  (ESPHome)
+    # ESPHome then recommended both of these again, unprompted, exactly as it
+    # did for the original board. Same die revision, so the same floor holds.
     advanced:
       minimum_chip_revision: "3.1"
       sram1_as_iram: true
@@ -194,6 +217,14 @@ captive_portal:
 # -----------------------------------------------------------------------------
 # THE TAP. rx_pin only -- no tx_pin key exists in this block on purpose.
 # -----------------------------------------------------------------------------
+external_components:
+  # Local, not git: this component exists only for this unit, and the protocol
+  # it fronts is documented nowhere but codypendant/aciq-minisplit-protocol.
+  - source:
+      type: local
+      path: components
+    components: [aciq_k18w]
+
 uart:
   - id: ac_bus
     rx_pin: ${uart_rx}
@@ -789,7 +820,15 @@ interval:
             // the recorder for no information, so only publish on change.
             if (hex != prev_frame) {
               prev_frame = hex;
-              id(ac_last_frame).publish_state(hex);
+              // Home Assistant rejects any state string over 255 chars: it
+              // stores `unknown` instead AND logs an ERROR for every frame.
+              // A full status frame is ~100 bytes = ~300 chars, so unACKed at
+              // ~72 frames/min this floods the core log and evicts all other
+              // history -- measured 2026-08-15, 92 errors in 4.5 min, the log
+              // window containing nothing else. Cut on a byte boundary:
+              // 245 chars is exactly 82 whole bytes, +4 for the marker = 249.
+              id(ac_last_frame).publish_state(
+                  hex.size() > 255 ? hex.substr(0, 245) + " ..." : hex);
             }
 
             bool mapped = false;
@@ -961,6 +1000,7 @@ interval:
                                // Reported unprompted every ~60 s.
                     if (val >= 500 && val <= 5000) {
                       id(ac_room_temp).publish_state(val / 100.0f * 9.0f / 5.0f + 32.0f);
+                      id(ac_climate).set_room_temperature_f(val / 100.0f * 9.0f / 5.0f + 32.0f);
                       mapped = true;
                     }
                     break;
@@ -1001,6 +1041,7 @@ interval:
                                // 86 the whole time, then both settled at 82.
                     if (val <= 100) {
                       id(ac_compressor_actual).publish_state(val);
+                      id(ac_climate).set_compressor_running(val > 0);
                       mapped = true;
                     }
                     break;
@@ -1226,6 +1267,7 @@ interval:
                   case 0x01:   // POWER -- confirmed: toggled 00/01/00/01
                                // exactly in step with four power presses.
                     id(ac_power).publish_state(val != 0);
+                    id(ac_climate).set_power_state(val != 0);
                     mapped = true;
                     break;
                   case 0x12:   // MODE -- mapped 2026-08-10 by pressing each
@@ -1240,12 +1282,14 @@ interval:
                       static const char *const NAMES[5] =
                           {"auto", "cool", "dry", "fan", "heat"};
                       id(ac_mode_raw).publish_state(val);
+                      id(ac_climate).set_mode_raw((int) val);
                       id(ac_mode_name).publish_state(NAMES[val]);
                       mapped = true;
                     }
                     break;
                   case 0x05:   // FAN -- 7 speeds + auto, so do not clamp tight
                     if (val <= 15) { id(ac_fan_speed).publish_state(val); mapped = true; }
+                    if (val <= 15) id(ac_climate).set_fan_state((int) val, val == 0);
                     break;
                   // ---- LOUVERS ----------------------------------------
                   // Encoding, confirmed 2026-08-10 across all 17 buttons:
@@ -1389,6 +1433,7 @@ interval:
                                // why "fan auto" looked like speed zero -- it is
                                // a flag plus a speed, not a speed value.
                     id(ac_fan_auto).publish_state(val != 0);
+                    id(ac_climate).set_fan_state(id(ac_fan_speed).has_state() ? (int) id(ac_fan_speed).state : 0, val != 0);
                     mapped = true;
                     break;
                   case 0x0A:   // phantom -- the low half of a wide field that
@@ -1420,6 +1465,7 @@ interval:
               // Sanity band: a real Fahrenheit setpoint, not a stray byte.
               if (sp >= 60 && sp <= 90) {
                 id(ac_setpoint).publish_state(sp);
+                id(ac_climate).set_setpoint_f(sp);
                 // Keep the CONTROL showing the truth. `Set Setpoint` is an
                 // optimistic template number, so without this it sits at its
                 // 60 F floor while the unit is at 80 -- and one nudge would
@@ -1440,7 +1486,9 @@ interval:
 
             if (!mapped && hex != prev_unmapped) {
               prev_unmapped = hex;
-              id(ac_last_unmapped).publish_state(hex);
+              // Same 255-char ceiling as Last Frame above.
+              id(ac_last_unmapped).publish_state(
+                  hex.size() > 255 ? hex.substr(0, 245) + " ..." : hex);
               ESP_LOGI(TAG, "  ^ UNMAPPED -- this is the one to decode");
             }
 
@@ -1770,7 +1818,7 @@ switch:
     # notices and flips this by hand.
     #
     # *** IF THE DONGLE EVER GOES BACK INTO CN-16: reflash
-    # `aciq-listen.yaml.listen-only` FIRST, or unwire GPIO17. *** With this set
+    # `aciq-k18w.yaml.listen-only` FIRST, or unwire GPIO17. *** With this set
     # to restore, a reboot with the dongle present would drive BLACK against the
     # dongle's own output. Set it back to ALWAYS_OFF if the tap ever returns to
     # coexisting with the stock module.
@@ -1864,6 +1912,67 @@ select:
           if (x == "auto")      { autoflag = 1; speed = 0; }
           else if (x == "mute") { speed = 1; }
           else                  { speed = (uint8_t) atoi(x.c_str()); }
+          auto c = aciq::Command(id(tx_counter)++);
+          c.field(0x73, autoflag).field(0x05, speed);
+          id(tx_send)->execute(c.build());
+
+# =============================================================================
+# CLIMATE ENTITY
+#
+# The HA-facing surface. It owns NO uart: state is pushed in from the decoder
+# above via set_*(), and control requests come back out as triggers so the
+# frame is still built with aciq_tx.h and sent through `tx_send`. That keeps
+# the Transmit Enabled interlock and the single write_array() on one path -- a
+# climate component with its own private route to the wire would bypass both.
+#
+# Nothing here publishes optimistic state. The AC reports what it actually did
+# a moment later, and that report is the authority. This is why the entity can
+# be honest rather than dead-reckoned the way IR-based integrations must be.
+# =============================================================================
+climate:
+  - platform: aciq_k18w
+    id: ac_climate
+    name: "Thermostat"
+
+    # Mode. `x` is the raw protocol value, or -1 for power off.
+    on_set_mode:
+      - lambda: |-
+          if (x < 0) {
+            auto off = aciq::Command(id(tx_counter)++);
+            off.field(0x01, 0x00);
+            id(tx_send)->execute(off.build());
+            return;
+          }
+          auto c = aciq::Command(id(tx_counter)++);
+          // Power on in the SAME frame when HA picks a mode while the unit is
+          // off. Multi-record commands are the unit's own idiom -- a real
+          // capture shows `13=00 00 01 01`, eco-off and power-on together.
+          // Also covers power being unknown after a reboot, since 0x01 is
+          // absolute and setting it on an already-on unit is a no-op.
+          if (!id(ac_power).has_state() || !id(ac_power).state) c.field(0x01, 0x01);
+          c.field(0x12, (uint8_t) x);
+          id(tx_send)->execute(c.build());
+
+    # Setpoint. `x` is Fahrenheit, already rounded whole in control().
+    on_set_temperature:
+      - lambda: |-
+          int f = (int) lroundf(x);
+          if (f < 60) f = 60;
+          if (f > 86) f = 86;
+          // Both records, as the app sends: the real value in centi-Celsius
+          // AND the degF display label. One without the other leaves the unit
+          // and its own display disagreeing.
+          auto c = aciq::Command(id(tx_counter)++);
+          c.wide(0x02, aciq::centi_c_for_degf(f)).param(0x27, (uint8_t) f);
+          id(tx_send)->execute(c.build());
+
+    # Fan. `x` is 0 for auto, 1 for mute, 2..7 for the manual speeds.
+    on_set_fan:
+      - lambda: |-
+          uint8_t speed = (uint8_t) x, autoflag = 0;
+          if (x <= 0) { autoflag = 1; speed = 0; }
+          // 0x73 is the AUTO FLAG, not a speed. Auto is flag=1 with speed 0;
+          // every manual speed is flag=0 plus the speed.
           auto c = aciq::Command(id(tx_counter)++);
           c.field(0x73, autoflag).field(0x05, speed);
           id(tx_send)->execute(c.build());
