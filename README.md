@@ -281,7 +281,10 @@ the mainboard only listens on it.
    same: `Frames Decoded` must keep climbing.
 4. Only now turn `Transmit Enabled` on, and send nothing at first. If the ACK is
    accepted, the AC's frame rate falls from ~75/min to ~3/min — see
-   [The ACK handshake](PROTOCOL.md#the-ack-handshake).
+   [The ACK handshake](PROTOCOL.md#the-ack-handshake). **Do not read that off
+   `Frames Decoded`**: once you transmit, your own frames echo back on the
+   module tap and are counted too, so it settles around double the AC's rate.
+   Watch `RX Bytes AC` and `RX Bytes Module` separately instead.
 
 Keeping `GPIO4` on BLACK afterwards is deliberate: every frame you send comes
 straight back in and is decoded as a module frame, so the log proves your own

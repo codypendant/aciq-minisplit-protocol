@@ -82,6 +82,18 @@ Two consequences worth having:
   frames are well-formed. It was how this build first confirmed its ACK was
   accepted, before any command was ever sent.
 
+> **The rates above are the AC's, and `Frames Decoded` is not.** Once you are
+> transmitting, every frame you send echoes back on the GPIO4 module tap and is
+> decoded too, so that counter runs at roughly the AC's rate *plus your own* —
+> measured 2026-08-15 at ~11/min against ~5/min of actual AC traffic. Reading it
+> as the table's "ESP32 acknowledging ~3.5" makes a perfectly healthy bus look
+> like a failing one.
+>
+> Compare **`RX Bytes AC` against `RX Bytes Module`** instead. They are
+> per-channel and count before any framing, so they separate the mainboard's
+> traffic from your own — and they are also what distinguishes a genuinely deaf
+> tap from a quiet one.
+
 Note this does **not** contradict the earlier finding that the AC transmits with
 no module attached — it does, which is what makes listen-only viable. It simply
 transmits far more.

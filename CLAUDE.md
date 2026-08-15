@@ -21,7 +21,11 @@ Non-zero exit means something drifted. It verifies that every link and anchor
 resolves, that the layout block matches the filesystem both ways, that no
 retracted claim has crept back in, that the README entity table covers every
 entity the config publishes, that every frame in `captures/` still passes
-`tools/crc.py`, and that no literal credential reached the published config.
+`tools/crc.py`, and that no literal credential reached a published config —
+**all of `esphome/*.yaml`, not just the takeover build.** That last check was
+single-file until 2026-08-15, which left the listen-only build unguarded; the
+live copy of *that* build is the one still carrying a literal fallback AP
+password, so it was precisely the file a careless `cp` would have shipped.
 
 **When a claim is disproved, add its wording to `RETRACTED` in that script.**
 That is what stops it reappearing three files away six weeks later. The list
@@ -57,6 +61,15 @@ roadmap asking for work already finished. None of it needed judgement to catch.
 - **`CN-16` is 5 V logic.** Any wiring guidance must keep the level shifter and
   must keep the yellow=+5V / white=GND warning, because the harness colours do
   not follow convention and transposing them puts 5 V into a GPIO.
+- **The `climate` entity's state comes from the bus, never from the command
+  path.** Every attribute in `esphome/components/aciq_k18w/` is set from the
+  record decoder — `set_setpoint_f`, `set_mode_raw`, `set_fan_state`,
+  `set_power_state` and friends are called when the AC *reports*, not when we
+  send. That is the entire reason this integration can claim to show what the
+  unit did rather than what it was told, and it is the one property that would
+  be easy to destroy while "fixing" a laggy control. If a command must feel
+  instant, the honest fix is optimistic UI in Home Assistant, not writing
+  assumed state into the entity.
 
 ## Evidence standards
 

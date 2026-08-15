@@ -204,14 +204,22 @@ def check_reference_frames():
 
 
 def check_secrets():
-    """The published config must never carry a literal credential. A plain
-    `cp` of the live config silently replaces !secret with the real value."""
-    cfg = read(CONFIG)
-    for lineno, line in enumerate(cfg.splitlines(), 1):
-        if re.match(r"\s*(password|ssid):\s*[\"']", line) and "!secret" not in line:
-            if "${" in line:            # a substitution, not a credential
-                continue
-            fail(f"{CONFIG}:{lineno}: literal credential -- use !secret")
+    """No published config may carry a literal credential. A plain `cp` of a
+    live config silently replaces !secret with the real value.
+
+    Every .yaml under esphome/ is checked, not just CONFIG. That used to be a
+    single-file check, which left the listen-only build unguarded -- and the
+    live copy of *that* build is the one that still holds a literal fallback AP
+    password, so it is exactly the file a careless `cp` would ship."""
+    names = sorted(f for f in os.listdir(os.path.join(ROOT, "esphome"))
+                   if f.endswith(".yaml"))
+    assert names, "no esphome/*.yaml found -- the credential check is not running"
+    for cfg in ("esphome/" + n for n in names):
+        for lineno, line in enumerate(read(cfg).splitlines(), 1):
+            if re.match(r"\s*(password|ssid):\s*[\"']", line) and "!secret" not in line:
+                if "${" in line:            # a substitution, not a credential
+                    continue
+                fail(f"{cfg}:{lineno}: literal credential -- use !secret")
 
 
 for check in (check_links, check_layout, check_retracted, check_entities,
